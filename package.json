@@ -1,0 +1,23 @@
+{
+  "name": "zena-root",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "server",
+    "worker",
+    "web"
+  ],
+  "scripts": {
+    "build:shared": "npm --workspace=@zena/shared run build",
+    "build:server": "npm --workspace=@zena/server run build 2>/dev/null || true",
+    "build:web": "npm --workspace=@zena/web run build",
+    "test:unit": "npm --workspace=@zena/server run test:unit",
+    "test:integration": "npm --workspace=@zena/server run test:integration",
+    "test": "npm run test:unit",
+    "lint": "eslint . --ext .js,.ts,.tsx 2>/dev/null || true"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: mern-chat-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: JWT_SECRET
+        generateValue: true
+      # sync: false = "ask for this in the dashboard, never store it in
+      # this file" — real secrets and anything environment-specific
+      # (your Atlas URI, your Upstash URI, your deployed frontend URL)
+      # belong there, not committed to git.
+      - key: MONGO_URI
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CLIENT_URL
+        sync: false

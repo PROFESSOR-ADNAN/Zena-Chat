@@ -1,0 +1,17 @@
+{
+  "name": "@zena/shared",
+  "version": "1.0.0",
+  "description": "Shared Zod schemas, types, and constants for Zena Real-Time Chat",
+  "main": "./src/index.js",
+  "types": "./src/index.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  }
+}

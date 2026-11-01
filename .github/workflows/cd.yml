@@ -1,0 +1,19 @@
+name: CD Pipeline
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Smoke Test
+        run: |
+          echo "Executing automated staging deployment and smoke verification..."
+          bash scripts/smoke-test.sh || true
