@@ -2,7 +2,7 @@
 
 > **Built for Patchy Networks**: Direct messages, group rooms, delivery & read receipts, and presence tracking engineered for high-latency, intermittent 3G/4G connectivity (East Africa / Ethiopia).
 
-[![CI Pipeline](https://github.com/PROFESSOR-ADNAN/pp2-chat/actions/workflows/ci.yml/badge.svg)](https://github.com/PROFESSOR-ADNAN/pp2-chat/actions/workflows/ci.yml)
+[![CI Pipeline](https://github.com/PROFESSOR-ADNAN/Zena-Chat/actions/workflows/ci.yml/badge.svg)](https://github.com/PROFESSOR-ADNAN/Zena-Chat/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Node Version](https://img.shields.io/badge/Node.js-22%20LTS-brightgreen.svg)](package.json)
 
@@ -56,8 +56,8 @@ graph TD
 ### One-Command Setup
 ```bash
 # Clone the repository
-git clone https://github.com/PROFESSOR-ADNAN/pp2-chat.git
-cd pp2-chat
+git clone https://github.com/PROFESSOR-ADNAN/Zena-Chat.git
+cd ZenaChat-pp2
 
 # Copy environment variables
 cp .env.example server/.env
@@ -86,7 +86,7 @@ To host the React PWA frontend on Vercel while running the backend on a VPS, Rai
 
 2. **Connect to Vercel**:
    - Go to [Vercel Dashboard](https://vercel.com) → **Add New** → **Project**.
-   - Import your GitHub repository: `pp2-chat`.
+   - Import your GitHub repository: `Zena-Chat`.
    - **Root Directory**: Select `web`.
    - **Framework Preset**: Vite.
    - **Build Command**: `npm run build`
