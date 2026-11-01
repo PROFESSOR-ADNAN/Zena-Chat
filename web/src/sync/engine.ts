@@ -16,6 +16,10 @@ export class SyncEngine {
     window.addEventListener('offline', () => this.handleNetworkChange(false));
   }
 
+  public getToken(): string | null {
+    return this.token;
+  }
+
   public init(token: string) {
     this.token = token;
     if (this.socket) {

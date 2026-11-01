@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.11",
-    "@zena/shared": "file:../packages/shared",
     "dexie": "^4.0.8",
     "dexie-react-hooks": "^1.1.7",
     "i18next": "^23.12.2",

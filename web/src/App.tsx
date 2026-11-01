@@ -19,7 +19,7 @@ import { syncEngine, ConnectionState } from './sync/engine';
 export default function App() {
   const { t, i18n } = useTranslation();
   const [connectionState, setConnectionState] = useState<ConnectionState>('offline');
-  const [activeConversationId, setActiveConversationId] = useState<string>('default-conv');
+  const [activeConversationId] = useState<string>('default-conv');
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -44,7 +44,9 @@ export default function App() {
       setConnectionState(state);
     });
 
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
