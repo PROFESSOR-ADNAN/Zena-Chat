@@ -5,6 +5,8 @@ import { Redis } from 'ioredis';
 // duplicates it for the subscriber side — PUBLISH doesn't require a
 // dedicated connection the way SUBSCRIBE does, so this same client can
 // serve as the adapter's "pub" client too).
-export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+export const redis = new Redis(
+  process.env.REDIS_URL || process.env.REDIS_URI || 'redis://localhost:6379'
+);
 
 redis.on('error', (err) => console.error('Redis error:', err.message));
