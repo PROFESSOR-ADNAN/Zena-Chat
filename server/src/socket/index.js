@@ -32,8 +32,15 @@ import {
 const httpError = (message, statusCode) => Object.assign(new Error(message), { statusCode });
 
 export const initSocket = (httpServer) => {
+  const clientUrlEnv = process.env.CLIENT_URL;
+  const corsOrigin = clientUrlEnv
+    ? clientUrlEnv.includes(',')
+      ? clientUrlEnv.split(',').map((s) => s.trim())
+      : clientUrlEnv
+    : '*';
+
   const io = new Server(httpServer, {
-    cors: { origin: process.env.CLIENT_URL || '*' },
+    cors: { origin: corsOrigin, credentials: true },
     pingInterval: 25000,
     pingTimeout: 20000,
     maxHttpBufferSize: 64 * 1024, // 64 KB limit

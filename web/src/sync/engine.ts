@@ -26,9 +26,18 @@ export class SyncEngine {
       this.socket.disconnect();
     }
 
+    if (!token) {
+      this.updateState('offline');
+      return;
+    }
+
     this.updateState('connecting');
 
-    this.socket = io(window.location.origin, {
+    const backendUrl =
+      import.meta.env.VITE_BACKEND_URL ||
+      (window.location.port === '5173' ? 'http://localhost:5000' : window.location.origin);
+
+    this.socket = io(backendUrl, {
       transports: ['websocket'],
       auth: { token, deviceId: this.getDeviceId() },
       reconnection: true,
@@ -38,6 +47,21 @@ export class SyncEngine {
     });
 
     this.setupSocketHandlers();
+  }
+
+  public disconnect() {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    this.token = null;
+    this.updateState('offline');
+  }
+
+  public joinConversation(conversationId: string) {
+    if (this.socket && this.socket.connected && conversationId) {
+      this.socket.emit('conversation:join', conversationId);
+    }
   }
 
   private getDeviceId(): string {
