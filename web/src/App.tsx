@@ -16,6 +16,7 @@ import {
   User,
   Plus,
   Users,
+  UserPlus,
 } from 'lucide-react';
 import { db, LocalMessage } from './db';
 import { syncEngine, ConnectionState } from './sync/engine';
@@ -63,6 +64,14 @@ export default function App() {
   const [inputText, setInputText] = useState('');
   const [newRoomName, setNewRoomName] = useState('');
   const [showNewRoomModal, setShowNewRoomModal] = useState(false);
+  const [roomError, setRoomError] = useState<string | null>(null);
+  const [roomLoading, setRoomLoading] = useState(false);
+
+  const [showNewDmModal, setShowNewDmModal] = useState(false);
+  const [targetUsername, setTargetUsername] = useState('');
+  const [dmError, setDmError] = useState<string | null>(null);
+  const [dmLoading, setDmLoading] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Reactive IndexedDB messages query
@@ -98,10 +107,46 @@ export default function App() {
     };
   }, [currentUser]);
 
-  // Join active conversation room on socket
+  // Fetch recent messages into IndexedDB cache when active conversation changes
+  const fetchHistory = async (convId: string) => {
+    if (!convId) return;
+    try {
+      const hist = await apiFetch(`/api/v1/conversations/${convId}/messages`);
+      if (Array.isArray(hist) && hist.length > 0) {
+        for (const m of hist) {
+          const sId =
+            typeof m.senderId === 'object' && m.senderId?._id
+              ? m.senderId._id
+              : m.senderId || m.sender?._id || m.sender || '';
+          const sName =
+            typeof m.senderId === 'object'
+              ? m.senderId.displayName || m.senderId.username
+              : m.sender?.displayName || m.sender?.username || m.senderName;
+
+          await db.messages.put({
+            id: m._id,
+            conversationId: m.conversationId || convId,
+            seq: m.seq,
+            eventSeq: m.eventSeq,
+            senderId: String(sId),
+            senderName: sName,
+            clientMsgId: m.clientMsgId || m._id,
+            text: m.text || '',
+            status: 'delivered',
+            createdAt: m.createdAt,
+          });
+        }
+      }
+    } catch (e: any) {
+      console.warn('Could not load history for conversation:', e.message);
+    }
+  };
+
+  // Join active conversation room on socket & fetch recent messages
   useEffect(() => {
     if (activeConversationId) {
       syncEngine.joinConversation(activeConversationId);
+      fetchHistory(activeConversationId);
     }
   }, [activeConversationId, connectionState]);
 
@@ -116,11 +161,13 @@ export default function App() {
       setConversations(list);
 
       if (list.length > 0) {
-        if (!activeConversationId || !list.some((c: ConversationItem) => c._id === activeConversationId)) {
-          setActiveConversationId(list[0]._id);
-        }
+        setActiveConversationId((prev) => {
+          if (prev && list.some((c: ConversationItem) => c._id === prev)) {
+            return prev;
+          }
+          return list[0]._id;
+        });
       } else {
-        // Auto-create a welcome community room if the user has no conversations yet
         createInitialRoom();
       }
     } catch (err: any) {
@@ -133,7 +180,7 @@ export default function App() {
       const newRoom = await apiFetch('/api/v1/conversations/group', {
         method: 'POST',
         body: JSON.stringify({
-          name: 'General Discussion',
+          name: 'General Chat',
           participantIds: [],
         }),
       });
@@ -142,7 +189,7 @@ export default function App() {
         setActiveConversationId(newRoom._id);
       }
     } catch {
-      // Ignore if user isn't allowed or offline
+      // Ignore if offline
     }
   };
 
@@ -240,6 +287,8 @@ export default function App() {
   const handleCreateRoom = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRoomName.trim()) return;
+    setRoomError(null);
+    setRoomLoading(true);
 
     try {
       const newRoom = await apiFetch('/api/v1/conversations/group', {
@@ -257,7 +306,37 @@ export default function App() {
         setShowNewRoomModal(false);
       }
     } catch (err: any) {
-      alert(err.message || 'Failed to create room');
+      setRoomError(err.message || 'Failed to create room');
+    } finally {
+      setRoomLoading(false);
+    }
+  };
+
+  const handleCreateDM = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetUsername.trim()) return;
+    setDmError(null);
+    setDmLoading(true);
+
+    try {
+      const newDm = await apiFetch('/api/v1/conversations/dm', {
+        method: 'POST',
+        body: JSON.stringify({ username: targetUsername.trim().toLowerCase() }),
+      });
+
+      if (newDm?._id) {
+        setConversations((prev) => {
+          const exists = prev.some((c) => c._id === newDm._id);
+          return exists ? prev : [newDm, ...prev];
+        });
+        setActiveConversationId(newDm._id);
+        setTargetUsername('');
+        setShowNewDmModal(false);
+      }
+    } catch (err: any) {
+      setDmError(err.message || 'Failed to start direct message');
+    } finally {
+      setDmLoading(false);
     }
   };
 
@@ -434,7 +513,22 @@ export default function App() {
 
           <div className="flex items-center space-x-1">
             <button
-              onClick={() => setShowNewRoomModal(true)}
+              onClick={() => {
+                setDmError(null);
+                setTargetUsername('');
+                setShowNewDmModal(true);
+              }}
+              title="New Direct Message"
+              className="p-1.5 text-gray-500 hover:text-zena-600 hover:bg-gray-100 rounded"
+            >
+              <UserPlus className="w-4 h-4" />
+            </button>
+            <button
+              onClick={() => {
+                setRoomError(null);
+                setNewRoomName('');
+                setShowNewRoomModal(true);
+              }}
               title="New Room"
               className="p-1.5 text-gray-500 hover:text-zena-600 hover:bg-gray-100 rounded"
             >
@@ -453,9 +547,23 @@ export default function App() {
         {/* Conversation List */}
         <div className="flex-1 overflow-y-auto divide-y divide-gray-100">
           {conversations.length === 0 && (
-            <div className="p-4 text-center text-gray-400 text-xs">
-              <Users className="w-8 h-8 mx-auto mb-1 opacity-30" />
+            <div className="p-4 text-center text-gray-400 text-xs space-y-3">
+              <Users className="w-8 h-8 mx-auto opacity-30" />
               <p>No conversations yet</p>
+              <div className="flex flex-col gap-1.5 pt-1">
+                <button
+                  onClick={() => setShowNewDmModal(true)}
+                  className="px-3 py-1.5 bg-zena-600 text-white rounded text-xs font-semibold hover:bg-zena-700 transition"
+                >
+                  Start Direct Message
+                </button>
+                <button
+                  onClick={() => setShowNewRoomModal(true)}
+                  className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-xs font-semibold hover:bg-gray-300 transition"
+                >
+                  Create Group Room
+                </button>
+              </div>
             </div>
           )}
 
@@ -548,69 +656,104 @@ export default function App() {
           </div>
         )}
 
-        {/* Chat Messages View */}
-        <main className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
-          {(!messages || messages.length === 0) && (
-            <div className="text-center py-20 text-gray-400">
-              <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-30" />
-              <p className="text-sm">{t('noConversations')}</p>
-            </div>
-          )}
-
-          {messages?.map((msg) => {
-            const isMe = msg.senderId === currentUser._id || msg.senderId === 'self';
-            const timeFormatted = new Intl.DateTimeFormat('en-US', {
-              timeZone: 'Africa/Addis_Ababa',
-              hour: '2-digit',
-              minute: '2-digit',
-            }).format(new Date(msg.createdAt));
-
-            return (
-              <div
-                key={msg.id || msg.clientMsgId}
-                className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+        {/* Chat Messages View or Empty Selection View */}
+        {!activeConversationId ? (
+          <main className="flex-1 p-6 flex flex-col items-center justify-center text-center bg-gray-50">
+            <MessageSquare className="w-14 h-14 text-zena-300 mb-3" />
+            <h2 className="text-base font-bold text-gray-800 mb-1">Welcome to Zena Chat</h2>
+            <p className="text-xs text-gray-500 max-w-xs mb-5">
+              Select an existing chat from the sidebar or start a new conversation below.
+            </p>
+            <div className="flex flex-wrap gap-2 justify-center">
+              <button
+                onClick={() => {
+                  setDmError(null);
+                  setTargetUsername('');
+                  setShowNewDmModal(true);
+                }}
+                className="px-4 py-2 bg-zena-600 text-white rounded-lg text-xs font-semibold hover:bg-zena-700 flex items-center space-x-1.5 shadow-sm transition"
               >
+                <UserPlus className="w-4 h-4" />
+                <span>Start Direct Message</span>
+              </button>
+              <button
+                onClick={() => {
+                  setRoomError(null);
+                  setNewRoomName('');
+                  setShowNewRoomModal(true);
+                }}
+                className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg text-xs font-semibold hover:bg-gray-50 flex items-center space-x-1.5 shadow-sm transition"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Create Group Room</span>
+              </button>
+            </div>
+          </main>
+        ) : (
+          <main className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
+            {(!messages || messages.length === 0) && (
+              <div className="text-center py-20 text-gray-400">
+                <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-30" />
+                <p className="text-sm">{t('noConversations')}</p>
+              </div>
+            )}
+
+            {messages?.map((msg) => {
+              const isMe = msg.senderId === currentUser._id || msg.senderId === 'self';
+              const timeFormatted = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Africa/Addis_Ababa',
+                hour: '2-digit',
+                minute: '2-digit',
+              }).format(new Date(msg.createdAt));
+
+              return (
                 <div
-                  className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm shadow-sm relative ${
-                    isMe
-                      ? 'bg-zena-600 text-white rounded-br-xs'
-                      : 'bg-white text-gray-900 rounded-bl-xs border border-gray-200'
-                  }`}
+                  key={msg.id || msg.clientMsgId}
+                  className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
                 >
-                  {!isMe && msg.senderName && (
-                    <p className="text-xs font-semibold text-zena-700 mb-1">
-                      {msg.senderName}
-                    </p>
-                  )}
-                  <p className="break-words leading-relaxed whitespace-pre-wrap">{msg.text}</p>
                   <div
-                    className={`text-[10px] mt-1 flex items-center justify-end space-x-1 ${
-                      isMe ? 'text-green-100' : 'text-gray-400'
+                    className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm shadow-sm relative ${
+                      isMe
+                        ? 'bg-zena-600 text-white rounded-br-xs'
+                        : 'bg-white text-gray-900 rounded-bl-xs border border-gray-200'
                     }`}
                   >
-                    <span>{timeFormatted}</span>
-                    {isMe && renderStatusIcon(msg.status)}
+                    {!isMe && msg.senderName && (
+                      <p className="text-xs font-semibold text-zena-700 mb-1">
+                        {msg.senderName}
+                      </p>
+                    )}
+                    <p className="break-words leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                    <div
+                      className={`text-[10px] mt-1 flex items-center justify-end space-x-1 ${
+                        isMe ? 'text-green-100' : 'text-gray-400'
+                      }`}
+                    >
+                      <span>{timeFormatted}</span>
+                      {isMe && renderStatusIcon(msg.status)}
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
-          })}
-          <div ref={messagesEndRef} />
-        </main>
+              );
+            })}
+            <div ref={messagesEndRef} />
+          </main>
+        )}
 
         {/* Message Compose Form */}
         <footer className="p-3 bg-white border-t border-gray-200">
           <form onSubmit={handleSend} className="flex items-center space-x-2">
             <input
               type="text"
+              disabled={!activeConversationId}
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              placeholder={t('typeMessage')}
-              className="flex-1 px-4 py-2.5 bg-gray-100 border border-gray-300 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-zena-500 focus:bg-white transition"
+              placeholder={activeConversationId ? t('typeMessage') : 'Select or start a conversation to chat...'}
+              className="flex-1 px-4 py-2.5 bg-gray-100 border border-gray-300 rounded-full text-sm focus:outline-none focus:ring-2 focus:ring-zena-500 focus:bg-white transition disabled:opacity-50"
             />
             <button
               type="submit"
-              disabled={!inputText.trim()}
+              disabled={!inputText.trim() || !activeConversationId}
               className="p-2.5 rounded-full bg-zena-600 text-white hover:bg-zena-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
             >
               <Send className="w-4 h-4" />
@@ -623,13 +766,20 @@ export default function App() {
       {showNewRoomModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-5">
-            <h3 className="text-base font-bold text-gray-800 mb-3">Create New Room</h3>
+            <h3 className="text-base font-bold text-gray-800 mb-1">Create New Room</h3>
+            <p className="text-xs text-gray-500 mb-3">Create a group chat room for your team or community.</p>
+            {roomError && (
+              <div className="mb-3 p-2.5 bg-red-50 text-red-700 rounded text-xs border border-red-200">
+                {roomError}
+              </div>
+            )}
             <form onSubmit={handleCreateRoom} className="space-y-4">
               <div>
                 <label className="block text-xs font-semibold text-gray-700 mb-1">Room Name</label>
                 <input
                   type="text"
                   required
+                  autoFocus
                   value={newRoomName}
                   onChange={(e) => setNewRoomName(e.target.value)}
                   placeholder="e.g. Addis Ababa Tech"
@@ -639,16 +789,68 @@ export default function App() {
               <div className="flex justify-end space-x-2">
                 <button
                   type="button"
-                  onClick={() => setShowNewRoomModal(false)}
+                  onClick={() => {
+                    setShowNewRoomModal(false);
+                    setRoomError(null);
+                  }}
                   className="px-3 py-1.5 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-3 py-1.5 text-xs font-semibold bg-zena-600 text-white hover:bg-zena-700 rounded"
+                  disabled={roomLoading || !newRoomName.trim()}
+                  className="px-3 py-1.5 text-xs font-semibold bg-zena-600 text-white hover:bg-zena-700 rounded disabled:opacity-50"
                 >
-                  Create Room
+                  {roomLoading ? 'Creating...' : 'Create Room'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* New Direct Message Modal */}
+      {showNewDmModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-5">
+            <h3 className="text-base font-bold text-gray-800 mb-1">Start Direct Message</h3>
+            <p className="text-xs text-gray-500 mb-3">Enter the username of the user you want to chat with.</p>
+            {dmError && (
+              <div className="mb-3 p-2.5 bg-red-50 text-red-700 rounded text-xs border border-red-200">
+                {dmError}
+              </div>
+            )}
+            <form onSubmit={handleCreateDM} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">Username</label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={targetUsername}
+                  onChange={(e) => setTargetUsername(e.target.value)}
+                  placeholder="e.g. adnan_dev"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
+                />
+              </div>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowNewDmModal(false);
+                    setDmError(null);
+                  }}
+                  className="px-3 py-1.5 text-xs font-semibold text-gray-600 hover:bg-gray-100 rounded"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={dmLoading || !targetUsername.trim()}
+                  className="px-3 py-1.5 text-xs font-semibold bg-zena-600 text-white hover:bg-zena-700 rounded disabled:opacity-50"
+                >
+                  {dmLoading ? 'Starting...' : 'Start Chat'}
                 </button>
               </div>
             </form>

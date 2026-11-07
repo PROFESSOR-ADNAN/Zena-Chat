@@ -1,20 +1,51 @@
 import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
+import Membership from '../models/Membership.js';
+import User from '../models/User.js';
 import {
   assertParticipant,
   findOrCreateDM,
-  markRead,
   markDelivered,
 } from '../services/conversation.service.js';
 import { isUserOnline } from '../services/presence.service.js';
 
 export const createDM = async (req, res, next) => {
   try {
-    const { userId } = req.body;
-    if (!userId) return res.status(400).json({ message: 'userId is required' });
+    let { userId, username } = req.body;
+    if (!userId && username) {
+      const targetUser = await User.findOne({ username: username.toLowerCase() });
+      if (!targetUser) return res.status(404).json({ message: 'User not found' });
+      userId = targetUser._id;
+    }
+    if (!userId) return res.status(400).json({ message: 'userId or username is required' });
+
+    if (userId.toString() === req.user._id.toString()) {
+      return res.status(400).json({ message: 'Cannot start a DM with yourself' });
+    }
 
     const conversation = await findOrCreateDM(req.user._id, userId);
-    res.status(200).json(conversation);
+
+    for (const p of [req.user._id, userId]) {
+      await Membership.findOneAndUpdate(
+        { conversationId: conversation._id, userId: p },
+        {
+          $setOnInsert: {
+            conversationId: conversation._id,
+            userId: p,
+            role: 'member',
+            lastDeliveredSeq: 0,
+            lastReadSeq: 0,
+          },
+        },
+        { upsert: true }
+      );
+    }
+
+    const populated = await Conversation.findById(conversation._id)
+      .populate('participants', 'username displayName name lastSeenAt')
+      .populate('lastMessage.sender', 'username displayName name');
+
+    res.status(200).json(populated);
   } catch (err) {
     next(err);
   }
@@ -23,23 +54,40 @@ export const createDM = async (req, res, next) => {
 export const createGroup = async (req, res, next) => {
   try {
     const { name, participantIds = [] } = req.body;
-    if (!name) return res.status(400).json({ message: 'name is required' });
-    if (participantIds.length === 0) {
-      return res.status(400).json({ message: 'At least one other participant is required' });
-    }
+    if (!name?.trim()) return res.status(400).json({ message: 'name is required' });
 
-    // De-duplicated, and always includes the creator even if the client
-    // forgot to — a group you create without yourself in it isn't useful.
-    const participants = [...new Set([req.user._id.toString(), ...participantIds])];
+    // Deduplicated, always includes the creator
+    const participants = [...new Set([req.user._id.toString(), ...(participantIds || [])])];
 
     const conversation = await Conversation.create({
       type: 'group',
-      name,
+      name: name.trim(),
       participants,
       createdBy: req.user._id,
+      lastSeq: 0,
+      lastEventSeq: 0,
     });
 
-    res.status(201).json(conversation);
+    for (const p of participants) {
+      await Membership.findOneAndUpdate(
+        { conversationId: conversation._id, userId: p },
+        {
+          $setOnInsert: {
+            conversationId: conversation._id,
+            userId: p,
+            role: p === req.user._id.toString() ? 'owner' : 'member',
+            lastDeliveredSeq: 0,
+            lastReadSeq: 0,
+          },
+        },
+        { upsert: true }
+      );
+    }
+
+    const populated = await Conversation.findById(conversation._id)
+      .populate('participants', 'username displayName name lastSeenAt');
+
+    res.status(201).json(populated);
   } catch (err) {
     next(err);
   }
@@ -47,25 +95,56 @@ export const createGroup = async (req, res, next) => {
 
 export const listMyConversations = async (req, res, next) => {
   try {
-    const conversations = await Conversation.find({ participants: req.user._id })
+    let conversations = await Conversation.find({ participants: req.user._id })
       .sort('-updatedAt')
-      .populate('participants', 'name lastSeenAt')
-      .populate('lastMessage.sender', 'name');
+      .populate('participants', 'username displayName name lastSeenAt')
+      .populate('lastMessage.sender', 'username displayName name');
 
-    // Presence is in-memory... no, Redis now (phase 4) — either way, not
-    // something a Mongo query can join against, so it's attached here
-    // per participant rather than stored on the documents themselves.
-    //
-    // isUserOnline became async when presence moved to Redis in phase 4;
-    // this call site was written back in phase 3 and never updated to
-    // await it, so it was quietly returning a Promise instead of a
-    // boolean here — fixed now, caught while touching this file for the
-    // sync work below, not caught by anything automated.
+    // Auto-create/join default General Room if user has no conversations
+    if (conversations.length === 0) {
+      let generalRoom = await Conversation.findOne({ name: 'General Chat', type: 'group' });
+      if (!generalRoom) {
+        generalRoom = await Conversation.create({
+          type: 'group',
+          name: 'General Chat',
+          participants: [req.user._id],
+          createdBy: req.user._id,
+          lastSeq: 0,
+          lastEventSeq: 0,
+        });
+      } else if (!generalRoom.participants.some((p) => p.toString() === req.user._id.toString())) {
+        generalRoom.participants.push(req.user._id);
+        await generalRoom.save();
+      }
+
+      await Membership.findOneAndUpdate(
+        { conversationId: generalRoom._id, userId: req.user._id },
+        {
+          $setOnInsert: {
+            conversationId: generalRoom._id,
+            userId: req.user._id,
+            role: 'member',
+            lastDeliveredSeq: 0,
+            lastReadSeq: 0,
+          },
+        },
+        { upsert: true }
+      );
+
+      conversations = await Conversation.find({ participants: req.user._id })
+        .sort('-updatedAt')
+        .populate('participants', 'username displayName name lastSeenAt')
+        .populate('lastMessage.sender', 'username displayName name');
+    }
+
     const withPresence = await Promise.all(
       conversations.map(async (c) => {
         const obj = c.toObject();
         obj.participants = await Promise.all(
-          obj.participants.map(async (p) => ({ ...p, isOnline: await isUserOnline(p._id) }))
+          (obj.participants || []).map(async (p) => ({
+            ...p,
+            isOnline: await isUserOnline(p._id),
+          }))
         );
         return obj;
       })
@@ -84,18 +163,10 @@ export const getMessages = async (req, res, next) => {
     assertParticipant(conversation, req.user._id);
 
     const limit = Math.min(parseInt(req.query.limit) || 30, 100);
-    const filter = { conversation: conversation._id };
+    const filter = {
+      $or: [{ conversationId: conversation._id }, { conversation: conversation._id }],
+    };
 
-    // Cursor pagination, not page/limit: a message feed only ever grows,
-    // and skip/limit gets slower the further back you page. A Mongo
-    // ObjectId encodes its creation time in its first 4 bytes, so
-    // comparing by _id IS comparing by creation time.
-    //
-    // Two directions, for two different situations: `before` scrolls
-    // backward into history (newest-first, matching how a chat log is
-    // read). `after` is for catching up post-reconnect — "what did I
-    // miss" — so it returns oldest-first, the order the missed messages
-    // actually happened in, ready to replay as-is.
     let sortDirection = -1;
     if (req.query.before) {
       filter._id = { $lt: req.query.before };
@@ -107,12 +178,9 @@ export const getMessages = async (req, res, next) => {
     const messages = await Message.find(filter)
       .sort({ _id: sortDirection })
       .limit(limit)
-      .populate('sender', 'name');
+      .populate('senderId', 'username displayName name')
+      .populate('sender', 'username displayName name');
 
-    // Fetching a message IS receiving it, whether that happens live over
-    // the socket or by catching up here — mark delivered up through
-    // whatever's newest in this batch. The batch is already sorted, so
-    // "newest" is just one end of it — which end depends on direction.
     if (messages.length > 0) {
       const newest = sortDirection === 1 ? messages[messages.length - 1]._id : messages[0]._id;
       if (markDelivered(conversation, req.user._id, newest)) await conversation.save();
@@ -127,12 +195,6 @@ export const getMessages = async (req, res, next) => {
   }
 };
 
-// A reconnecting client's real starting point: one call instead of
-// looping the per-conversation endpoint above over every conversation
-// it's part of. Returns, for each conversation with activity since
-// `since`, the conversation itself plus the actual missed messages
-// (capped — a conversation with more than that paginates the normal way
-// afterward, via getMessages' `after`).
 const SYNC_MESSAGE_CAP = 50;
 
 export const syncConversations = async (req, res, next) => {
@@ -146,18 +208,19 @@ export const syncConversations = async (req, res, next) => {
       participants: req.user._id,
       updatedAt: { $gt: since },
     })
-      .populate('participants', 'name lastSeenAt')
-      .populate('lastMessage.sender', 'name');
+      .populate('participants', 'username displayName name lastSeenAt')
+      .populate('lastMessage.sender', 'username displayName name');
 
     const results = await Promise.all(
       conversations.map(async (conversation) => {
         const messages = await Message.find({
-          conversation: conversation._id,
+          $or: [{ conversationId: conversation._id }, { conversation: conversation._id }],
           createdAt: { $gt: since },
         })
           .sort({ _id: 1 })
           .limit(SYNC_MESSAGE_CAP)
-          .populate('sender', 'name');
+          .populate('senderId', 'username displayName name')
+          .populate('sender', 'username displayName name');
 
         if (messages.length > 0) {
           const newest = messages[messages.length - 1]._id;

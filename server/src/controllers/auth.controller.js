@@ -191,6 +191,33 @@ export const getMe = async (req, res, next) => {
   }
 };
 
+export const searchUsers = async (req, res, next) => {
+  try {
+    const q = req.query.q || '';
+    const query = q
+      ? {
+          $and: [
+            { _id: { $ne: req.user._id } },
+            {
+              $or: [
+                { username: { $regex: q, $options: 'i' } },
+                { displayName: { $regex: q, $options: 'i' } },
+              ],
+            },
+          ],
+        }
+      : { _id: { $ne: req.user._id } };
+
+    const users = await User.find(query)
+      .select('username displayName avatarUrl isOnline')
+      .limit(20);
+
+    res.json(users);
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const suspendUser = async (req, res, next) => {
   try {
     const { userId } = req.params;
