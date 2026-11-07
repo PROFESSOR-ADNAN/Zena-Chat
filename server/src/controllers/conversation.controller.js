@@ -45,6 +45,14 @@ export const createDM = async (req, res, next) => {
       .populate('participants', 'username displayName name lastSeenAt')
       .populate('lastMessage.sender', 'username displayName name');
 
+    const io = req.app.get('io');
+    if (io) {
+      for (const p of conversation.participants) {
+        const pId = p?._id ? p._id.toString() : p.toString();
+        io.to(`user:${pId}`).emit('conversation:new', populated);
+      }
+    }
+
     res.status(200).json(populated);
   } catch (err) {
     next(err);
@@ -86,6 +94,14 @@ export const createGroup = async (req, res, next) => {
 
     const populated = await Conversation.findById(conversation._id)
       .populate('participants', 'username displayName name lastSeenAt');
+
+    const io = req.app.get('io');
+    if (io) {
+      for (const p of participants) {
+        const pId = p?._id ? p._id.toString() : p.toString();
+        io.to(`user:${pId}`).emit('conversation:new', populated);
+      }
+    }
 
     res.status(201).json(populated);
   } catch (err) {

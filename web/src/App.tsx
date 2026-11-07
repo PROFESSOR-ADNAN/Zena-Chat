@@ -74,19 +74,55 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Reactive IndexedDB messages query
+  // Reactive IndexedDB messages query with deduplication
   const messages = useLiveQuery<LocalMessage[]>(
     async () => {
       if (!activeConversationId) return [];
-      return await db.messages
+      const raw = await db.messages
         .where('conversationId')
         .equals(activeConversationId)
         .sortBy('createdAt');
+
+      const seen = new Set<string>();
+      const deduped: LocalMessage[] = [];
+      for (const m of raw) {
+        const key = m.clientMsgId || m.id;
+        if (!seen.has(key)) {
+          seen.add(key);
+          deduped.push(m);
+        }
+      }
+      return deduped;
     },
     [activeConversationId]
   );
 
   const pendingOutboxCount = useLiveQuery(() => db.outbox.count()) || 0;
+
+  // Listen to new conversations and new messages from socket in real-time
+  useEffect(() => {
+    const unsubConv = syncEngine.onConversationNew((newConv) => {
+      setConversations((prev) => {
+        if (prev.some((c) => c._id === newConv._id)) return prev;
+        return [newConv, ...prev];
+      });
+    });
+
+    const unsubMsg = syncEngine.onMessageNew((newMsg) => {
+      setConversations((prev) => {
+        const exists = prev.some((c) => c._id === newMsg.conversationId);
+        if (!exists) {
+          loadConversations();
+        }
+        return prev;
+      });
+    });
+
+    return () => {
+      unsubConv();
+      unsubMsg();
+    };
+  }, []);
 
   // Initialize socket when user is logged in
   useEffect(() => {
@@ -122,6 +158,13 @@ export default function App() {
             typeof m.senderId === 'object'
               ? m.senderId.displayName || m.senderId.username
               : m.sender?.displayName || m.sender?.username || m.senderName;
+
+          if (m.clientMsgId) {
+            const local = await db.messages.where('clientMsgId').equals(m.clientMsgId).first();
+            if (local && local.id !== m._id) {
+              await db.messages.delete(local.id);
+            }
+          }
 
           await db.messages.put({
             id: m._id,

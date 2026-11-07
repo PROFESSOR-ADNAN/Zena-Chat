@@ -9,7 +9,10 @@ export class SyncEngine {
   private isSyncing = false;
   private eventBuffer: any[] = [];
   private stateListeners: Set<(state: ConnectionState) => void> = new Set();
+  private conversationListeners: Set<(conv: any) => void> = new Set();
+  private messageListeners: Set<(msg: any) => void> = new Set();
   private currentState: ConnectionState = 'offline';
+  private activeRoomId: string | null = null;
 
   constructor() {
     window.addEventListener('online', () => this.handleNetworkChange(true));
@@ -18,6 +21,17 @@ export class SyncEngine {
 
   public getToken(): string | null {
     return this.token;
+  }
+
+  public getCurrentUserId(): string | null {
+    try {
+      const saved = localStorage.getItem('zena_user');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return parsed._id || parsed.id || null;
+      }
+    } catch {}
+    return null;
   }
 
   public init(token: string) {
@@ -55,10 +69,12 @@ export class SyncEngine {
       this.socket = null;
     }
     this.token = null;
+    this.activeRoomId = null;
     this.updateState('offline');
   }
 
   public joinConversation(conversationId: string) {
+    this.activeRoomId = conversationId;
     if (this.socket && this.socket.connected && conversationId) {
       this.socket.emit('conversation:join', conversationId);
     }
@@ -77,6 +93,16 @@ export class SyncEngine {
     this.stateListeners.add(listener);
     listener(this.currentState);
     return () => this.stateListeners.delete(listener);
+  }
+
+  public onConversationNew(listener: (conv: any) => void) {
+    this.conversationListeners.add(listener);
+    return () => this.conversationListeners.delete(listener);
+  }
+
+  public onMessageNew(listener: (msg: any) => void) {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
 
   private updateState(state: ConnectionState) {
@@ -98,6 +124,12 @@ export class SyncEngine {
 
     this.socket.on('connect', async () => {
       this.updateState('connected');
+
+      // Re-join active room if set
+      if (this.activeRoomId) {
+        this.socket?.emit('conversation:join', this.activeRoomId);
+      }
+
       await this.runSync();
       await this.flushOutbox();
     });
@@ -112,6 +144,10 @@ export class SyncEngine {
         return;
       }
       await this.applyIncomingMessage(data);
+    });
+
+    this.socket.on('conversation:new', (conv: any) => {
+      this.conversationListeners.forEach((l) => l(conv));
     });
 
     this.socket.on('receipt:update', async (data: any) => {
@@ -156,28 +192,46 @@ export class SyncEngine {
   }
 
   private async applyIncomingMessage(msg: any) {
-    const existing = await db.messages.get(msg._id);
-    if (!existing) {
-      await db.messages.put({
-        id: msg._id,
-        conversationId: msg.conversationId,
-        seq: msg.seq,
-        eventSeq: msg.eventSeq,
-        senderId: msg.senderId,
-        senderName: msg.senderDisplayName || msg.senderUsername,
-        clientMsgId: msg.clientMsgId,
-        text: msg.text || '',
-        status: 'delivered',
-        createdAt: msg.createdAt,
-      });
+    // 1. If we have a local optimistic message with this clientMsgId, delete it first
+    if (msg.clientMsgId) {
+      const local = await db.messages.where('clientMsgId').equals(msg.clientMsgId).first();
+      if (local && local.id !== msg._id) {
+        await db.messages.delete(local.id);
+      }
+    }
 
-      // Update sync cursor
+    const currentUserId = this.getCurrentUserId();
+    const isMe =
+      msg.senderId === currentUserId ||
+      msg.senderId?._id === currentUserId ||
+      msg.senderId === 'self';
+
+    await db.messages.put({
+      id: msg._id,
+      conversationId: msg.conversationId,
+      seq: msg.seq,
+      eventSeq: msg.eventSeq,
+      senderId: typeof msg.senderId === 'object' && msg.senderId?._id ? msg.senderId._id : (msg.senderId || 'other'),
+      senderName:
+        msg.senderDisplayName ||
+        msg.senderUsername ||
+        (typeof msg.senderId === 'object' ? msg.senderId.displayName || msg.senderId.username : undefined),
+      clientMsgId: msg.clientMsgId || msg._id,
+      text: msg.text || '',
+      status: isMe ? 'sent' : 'delivered',
+      createdAt: msg.createdAt,
+    });
+
+    // Update sync cursor
+    if (msg.eventSeq) {
       await db.syncState.put({
         conversationId: msg.conversationId,
         lastEventSeq: msg.eventSeq,
         updatedAt: new Date().toISOString(),
       });
     }
+
+    this.messageListeners.forEach((l) => l(msg));
   }
 
   private async applyReceiptUpdate(data: { conversationId: string; deliveredSeq?: number; readSeq?: number }) {
@@ -256,10 +310,17 @@ export class SyncEngine {
           clearTimeout(timer);
           if (ack?.ok) {
             await db.outbox.delete(item.clientMsgId);
-            await db.messages.update(item.clientMsgId, {
+            // Delete optimistic local record keyed by clientMsgId and replace with confirmed server record
+            await db.messages.delete(item.clientMsgId);
+            await db.messages.put({
               id: ack.serverMsgId,
+              conversationId: item.conversationId,
               seq: ack.seq,
+              senderId: this.getCurrentUserId() || 'self',
+              clientMsgId: item.clientMsgId,
+              text: item.text,
               status: 'sent',
+              createdAt: item.createdAt,
             });
           } else {
             await db.messages.update(item.clientMsgId, { status: 'failed' });

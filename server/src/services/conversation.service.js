@@ -4,7 +4,10 @@ import Conversation from '../models/Conversation.js';
 // history over REST — one place decides "are you allowed in here",
 // instead of the check drifting between the two entry points.
 export const assertParticipant = (conversation, userId) => {
-  const isParticipant = conversation.participants.some((p) => p.toString() === userId.toString());
+  const isParticipant = conversation.participants.some((p) => {
+    const pId = p?._id ? p._id.toString() : p.toString();
+    return pId === userId.toString();
+  });
   if (!isParticipant) {
     const err = new Error('Not a participant in this conversation');
     err.statusCode = 403;

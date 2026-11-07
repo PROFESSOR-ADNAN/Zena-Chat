@@ -14,6 +14,7 @@ connectDB();
 // upgrade Socket.IO needs.
 const httpServer = http.createServer(app);
 const io = initSocket(httpServer);
+app.set('io', io);
 
 // Cleans up any presence entries left behind by a crashed instance (one
 // that never got to run its sockets' disconnect handlers) — see the

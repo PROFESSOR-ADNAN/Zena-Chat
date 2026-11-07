@@ -100,6 +100,16 @@ export const initSocket = (httpServer) => {
     // Join personal user room for targeted notifications
     socket.join(`user:${userId}`);
 
+    // Auto-join all existing conversations for this user so they receive messages instantly
+    try {
+      const userConvs = await Conversation.find({ participants: socket.user._id }).select('_id');
+      for (const c of userConvs) {
+        socket.join(c._id.toString());
+      }
+    } catch (e) {
+      console.warn('Auto-join user rooms error:', e.message);
+    }
+
     try {
       const justCameOnline = await registerConnection(userId, `${socket.id}:${deviceId}`);
       const contactIds = await getContactIds(userId);
@@ -134,8 +144,17 @@ export const initSocket = (httpServer) => {
     // Room join
     socket.on('conversation:join', async (conversationId, callback) => {
       try {
-        const conversation = await Conversation.findById(conversationId);
+        let conversation = await Conversation.findById(conversationId);
         if (!conversation) throw httpError('Conversation not found', 404);
+
+        if (
+          conversation.name === 'General Chat' &&
+          !conversation.participants.some((p) => (p?._id || p).toString() === socket.user._id.toString())
+        ) {
+          conversation.participants.push(socket.user._id);
+          await conversation.save();
+        }
+
         assertParticipant(conversation, socket.user._id);
 
         socket.join(conversationId);
@@ -171,8 +190,7 @@ export const initSocket = (httpServer) => {
         const populated = await message.populate('senderId', 'username displayName avatarUrl');
 
         if (!isDuplicate) {
-          // Broadcast to conversation room across all replicas via Redis adapter
-          io.to(conversationId).emit('message:new', {
+          const messageData = {
             _id: populated._id,
             conversationId: populated.conversationId,
             seq: populated.seq,
@@ -186,7 +204,16 @@ export const initSocket = (httpServer) => {
             attachmentId: populated.attachmentId,
             replyToId: populated.replyToId,
             createdAt: populated.createdAt.toISOString(),
-          });
+          };
+
+          // Broadcast to conversation room across all replicas via Redis adapter
+          io.to(conversationId).emit('message:new', messageData);
+
+          // ALSO broadcast to each participant's personal room
+          for (const p of conversation.participants) {
+            const pId = p?._id ? p._id.toString() : p.toString();
+            io.to(`user:${pId}`).emit('message:new', messageData);
+          }
         }
 
         callback?.({
