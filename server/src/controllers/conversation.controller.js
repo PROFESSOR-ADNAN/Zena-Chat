@@ -60,20 +60,54 @@ export const createDM = async (req, res, next) => {
   }
 };
 
+// Consolidate duplicate rooms with the same name (e.g. "General Chat" or custom rooms)
+export const consolidateRoomByName = async (name, type = 'group') => {
+  const escaped = name.trim().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+  const rooms = await Conversation.find({
+    type,
+    name: { $regex: `^${escaped}$`, $options: 'i' },
+  }).sort('createdAt');
+
+  if (rooms.length === 0) return null;
+  if (rooms.length === 1) return rooms[0];
+
+  const primary = rooms[0];
+  const duplicates = rooms.slice(1);
+  const primaryParticipants = new Set(primary.participants.map((p) => (p?._id || p).toString()));
+
+  for (const dup of duplicates) {
+    // 1. Merge participants
+    for (const p of dup.participants) {
+      const pId = (p?._id || p).toString();
+      primaryParticipants.add(pId);
+    }
+
+    // 2. Re-point messages from duplicate to primary
+    await Message.updateMany(
+      { $or: [{ conversationId: dup._id }, { conversation: dup._id }] },
+      { $set: { conversationId: primary._id } }
+    );
+
+    // 3. Clean up duplicate conversation and memberships
+    await Conversation.findByIdAndDelete(dup._id);
+    await Membership.deleteMany({ conversationId: dup._id });
+  }
+
+  primary.participants = Array.from(primaryParticipants);
+  await primary.save();
+
+  return primary;
+};
+
 export const createGroup = async (req, res, next) => {
   try {
     const { name, participantIds = [] } = req.body;
     const trimmedName = name?.trim();
     if (!trimmedName) return res.status(400).json({ message: 'name is required' });
 
-    // Look for an existing room with this name (case-insensitive)
-    const escaped = trimmedName.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
-    let conversation = await Conversation.findOne({
-      type: 'group',
-      name: { $regex: `^${escaped}$`, $options: 'i' },
-    });
-
+    let conversation = await consolidateRoomByName(trimmedName, 'group');
     let isNew = false;
+
     if (!conversation) {
       // Room does not exist yet: create it with creator as participant
       const participants = [...new Set([req.user._id.toString(), ...(participantIds || [])])];
@@ -129,8 +163,8 @@ export const createGroup = async (req, res, next) => {
 
 export const listMyConversations = async (req, res, next) => {
   try {
-    // 1. Always ensure General Chat exists and current user is a participant
-    let generalRoom = await Conversation.findOne({ name: 'General Chat', type: 'group' });
+    // 1. Always ensure a single consolidated General Chat exists and current user is a participant
+    let generalRoom = await consolidateRoomByName('General Chat', 'group');
     if (!generalRoom) {
       generalRoom = await Conversation.create({
         type: 'group',
@@ -160,14 +194,32 @@ export const listMyConversations = async (req, res, next) => {
     );
 
     // 2. Fetch only conversations where current user is an active participant
-    // (General Chat is included because of step 1; separate rooms only show if user joined/created them)
     const conversations = await Conversation.find({ participants: req.user._id })
       .sort('-updatedAt')
       .populate('participants', 'username displayName name lastSeenAt')
       .populate('lastMessage.sender', 'username displayName name');
 
+    // Deduplicate any group rooms with identical names (ensures clean sidebar)
+    const seenGroupNames = new Set();
+    const uniqueConversations = [];
+    for (const c of conversations) {
+      if (c.type === 'group' && c.name) {
+        const lower = c.name.toLowerCase().trim();
+        if (seenGroupNames.has(lower)) continue;
+        seenGroupNames.add(lower);
+      }
+      uniqueConversations.push(c);
+    }
+
+    // Pin "General Chat" to top so every user has the exact same primary conversation
+    uniqueConversations.sort((a, b) => {
+      if (a.name?.toLowerCase().trim() === 'general chat') return -1;
+      if (b.name?.toLowerCase().trim() === 'general chat') return 1;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+
     const withPresence = await Promise.all(
-      conversations.map(async (c) => {
+      uniqueConversations.map(async (c) => {
         const obj = c.toObject();
         obj.participants = await Promise.all(
           (obj.participants || []).map(async (p) => ({
@@ -194,7 +246,11 @@ export const getMessages = async (req, res, next) => {
     const limit = Math.min(parseInt(req.query.limit) || 100, 200);
     const filter = {
       $or: [{ conversationId: conversation._id }, { conversation: conversation._id }],
-      deletedAt: null,
+      $and: [
+        {
+          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+        },
+      ],
     };
 
     let sortDirection = -1;
@@ -212,8 +268,13 @@ export const getMessages = async (req, res, next) => {
       .populate('sender', 'username displayName name');
 
     if (messages.length > 0) {
-      const newest = sortDirection === 1 ? messages[messages.length - 1]._id : messages[0]._id;
-      if (markDelivered(conversation, req.user._id, newest)) await conversation.save();
+      const newest = sortDirection === 1 ? messages[messages.length - 1] : messages[0];
+      if (newest?.seq) {
+        await Membership.findOneAndUpdate(
+          { conversationId: conversation._id, userId: req.user._id },
+          { $max: { lastDeliveredSeq: newest.seq } }
+        ).catch(() => {});
+      }
     }
 
     const chronological = sortDirection === -1 ? messages.reverse() : messages;
@@ -255,8 +316,13 @@ export const syncConversations = async (req, res, next) => {
           .populate('sender', 'username displayName name');
 
         if (messages.length > 0) {
-          const newest = messages[messages.length - 1]._id;
-          if (markDelivered(conversation, req.user._id, newest)) await conversation.save();
+          const newest = messages[messages.length - 1];
+          if (newest?.seq) {
+            await Membership.findOneAndUpdate(
+              { conversationId: conversation._id, userId: req.user._id },
+              { $max: { lastDeliveredSeq: newest.seq } }
+            ).catch(() => {});
+          }
         }
 
         const participants = await Promise.all(
@@ -280,6 +346,12 @@ export const syncConversations = async (req, res, next) => {
   }
 };
 
+    res.json({ syncedAt: new Date(), conversations: results });
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const deleteConversation = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -288,7 +360,7 @@ export const deleteConversation = async (req, res, next) => {
       return res.status(404).json({ message: 'Conversation not found' });
     }
 
-    if (conversation.name === 'General Chat' && conversation.type === 'group') {
+    if (conversation.name?.toLowerCase().trim() === 'general chat' && conversation.type === 'group') {
       return res.status(400).json({ message: 'Cannot delete General Chat' });
     }
 
@@ -341,7 +413,7 @@ export const editMessageController = async (req, res, next) => {
         editedAt: populated.editedAt?.toISOString?.() || new Date().toISOString(),
       };
       const conversation = await Conversation.findById(id);
-      if (conversation?.name === 'General Chat') {
+      if (conversation?.name?.toLowerCase().trim() === 'general chat') {
         io.emit('message:edited', payload);
       } else {
         io.to(id).emit('message:edited', payload);
@@ -378,7 +450,7 @@ export const deleteMessageController = async (req, res, next) => {
         _id: messageId,
         conversationId: id,
       };
-      if (conversation?.name === 'General Chat') {
+      if (conversation?.name?.toLowerCase().trim() === 'general chat') {
         io.emit('message:deleted', payload);
       } else {
         io.to(id).emit('message:deleted', payload);

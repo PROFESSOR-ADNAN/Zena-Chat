@@ -103,7 +103,10 @@ export const initSocket = (httpServer) => {
     // Auto-join all existing conversations for this user so they receive messages instantly
     try {
       const userConvs = await Conversation.find({
-        $or: [{ participants: socket.user._id }, { name: 'General Chat' }],
+        $or: [
+          { participants: socket.user._id },
+          { name: { $regex: '^General Chat$', $options: 'i' } },
+        ],
       }).select('_id');
       for (const c of userConvs) {
         socket.join(c._id.toString());
@@ -150,7 +153,7 @@ export const initSocket = (httpServer) => {
         if (!conversation) throw httpError('Conversation not found', 404);
 
         if (
-          conversation.name === 'General Chat' &&
+          conversation.name?.toLowerCase().trim() === 'general chat' &&
           !conversation.participants.some((p) => (p?._id || p).toString() === socket.user._id.toString())
         ) {
           conversation.participants.push(socket.user._id);
@@ -209,7 +212,7 @@ export const initSocket = (httpServer) => {
           };
 
           // If it's General Chat, broadcast to all users
-          if (conversation.name === 'General Chat') {
+          if (conversation.name?.toLowerCase().trim() === 'general chat') {
             io.emit('message:new', messageData);
           } else {
             // For separate rooms and DMs, broadcast ONLY to room participants
@@ -252,7 +255,7 @@ export const initSocket = (httpServer) => {
         };
 
         const conversation = await Conversation.findById(conversationId);
-        if (conversation?.name === 'General Chat') {
+        if (conversation?.name?.toLowerCase().trim() === 'general chat') {
           io.emit('message:edited', eventData);
         } else {
           io.to(conversationId).emit('message:edited', eventData);
@@ -285,7 +288,7 @@ export const initSocket = (httpServer) => {
         };
 
         const conversation = await Conversation.findById(conversationId);
-        if (conversation?.name === 'General Chat') {
+        if (conversation?.name?.toLowerCase().trim() === 'general chat') {
           io.emit('message:deleted', delData);
         } else {
           io.to(conversationId).emit('message:deleted', delData);

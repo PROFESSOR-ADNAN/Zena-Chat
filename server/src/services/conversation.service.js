@@ -5,7 +5,7 @@ import Conversation from '../models/Conversation.js';
 // instead of the check drifting between the two entry points.
 export const assertParticipant = (conversation, userId) => {
   // All users are participants in General Chat
-  if (conversation.name === 'General Chat') {
+  if (conversation.name?.toLowerCase().trim() === 'general chat') {
     if (!conversation.participants?.some((p) => (p?._id || p).toString() === userId.toString())) {
       conversation.participants?.push?.(userId);
       conversation.save?.().catch?.(() => {});
@@ -36,6 +36,9 @@ const isNewer = (candidateId, currentId) => !currentId || candidateId.toString()
 // whether it actually advanced, so callers know whether there's
 // anything new to broadcast.
 const advance = (conversation, field, userId, messageId, atField) => {
+  if (!conversation || !conversation[field] || !Array.isArray(conversation[field])) {
+    return false;
+  }
   const entry = conversation[field].find((e) => e.user.toString() === userId.toString());
   if (entry && !isNewer(messageId, entry.message)) return false;
 

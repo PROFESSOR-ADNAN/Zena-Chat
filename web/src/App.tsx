@@ -203,10 +203,7 @@ export default function App() {
 
           const currentUserId = currentUser?._id;
           const isMe = sId === String(currentUserId);
-          const cId =
-            typeof m.conversationId === 'object' && m.conversationId?._id
-              ? String(m.conversationId._id)
-              : String(m.conversationId || convId);
+          const cId = convId;
 
           await db.messages.put({
             id: m._id,
