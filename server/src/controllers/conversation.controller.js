@@ -191,9 +191,10 @@ export const getMessages = async (req, res, next) => {
     if (!conversation) return res.status(404).json({ message: 'Conversation not found' });
     assertParticipant(conversation, req.user._id);
 
-    const limit = Math.min(parseInt(req.query.limit) || 30, 100);
+    const limit = Math.min(parseInt(req.query.limit) || 100, 200);
     const filter = {
       $or: [{ conversationId: conversation._id }, { conversation: conversation._id }],
+      deletedAt: null,
     };
 
     let sortDirection = -1;
@@ -215,8 +216,10 @@ export const getMessages = async (req, res, next) => {
       if (markDelivered(conversation, req.user._id, newest)) await conversation.save();
     }
 
+    const chronological = sortDirection === -1 ? messages.reverse() : messages;
+
     res.json({
-      messages,
+      messages: chronological,
       nextCursor: messages.length === limit ? messages[messages.length - 1]._id : null,
     });
   } catch (err) {

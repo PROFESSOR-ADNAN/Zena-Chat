@@ -176,13 +176,19 @@ export default function App() {
   const fetchHistory = async (convId: string) => {
     if (!convId) return;
     try {
-      const hist = await apiFetch(`/api/v1/conversations/${convId}/messages`);
-      if (Array.isArray(hist) && hist.length > 0) {
+      const data = await apiFetch(`/api/v1/conversations/${convId}/messages?limit=100`);
+      const hist = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.messages)
+        ? data.messages
+        : [];
+
+      if (hist.length > 0) {
         for (const m of hist) {
           const sId =
             typeof m.senderId === 'object' && m.senderId?._id
-              ? m.senderId._id
-              : m.senderId || m.sender?._id || m.sender || '';
+              ? String(m.senderId._id)
+              : String(m.senderId || m.sender?._id || m.sender || '');
           const sName =
             typeof m.senderId === 'object'
               ? m.senderId.displayName || m.senderId.username
@@ -195,17 +201,34 @@ export default function App() {
             }
           }
 
+          const currentUserId = currentUser?._id;
+          const isMe = sId === String(currentUserId);
+          const cId =
+            typeof m.conversationId === 'object' && m.conversationId?._id
+              ? String(m.conversationId._id)
+              : String(m.conversationId || convId);
+
           await db.messages.put({
             id: m._id,
-            conversationId: m.conversationId || convId,
+            conversationId: cId,
             seq: m.seq,
             eventSeq: m.eventSeq,
-            senderId: String(sId),
+            senderId: sId,
             senderName: sName,
             clientMsgId: m.clientMsgId || m._id,
             text: m.text || '',
-            status: 'delivered',
-            createdAt: m.createdAt,
+            status: isMe ? 'sent' : 'delivered',
+            createdAt:
+              typeof m.createdAt === 'string'
+                ? m.createdAt
+                : m.createdAt
+                ? new Date(m.createdAt).toISOString()
+                : new Date().toISOString(),
+            editedAt: m.editedAt
+              ? typeof m.editedAt === 'string'
+                ? m.editedAt
+                : new Date(m.editedAt).toISOString()
+              : undefined,
           });
         }
       }
@@ -234,10 +257,9 @@ export default function App() {
 
       if (list.length > 0) {
         setActiveConversationId((prev) => {
-          if (prev && list.some((c: ConversationItem) => c._id === prev)) {
-            return prev;
-          }
-          return list[0]._id;
+          const nextId = prev && list.some((c: ConversationItem) => c._id === prev) ? prev : list[0]._id;
+          fetchHistory(nextId);
+          return nextId;
         });
       }
     } catch (err: any) {
@@ -357,6 +379,8 @@ export default function App() {
           return exists ? prev : [newRoom, ...prev];
         });
         setActiveConversationId(newRoom._id);
+        fetchHistory(newRoom._id);
+        syncEngine.joinConversation(newRoom._id);
         setNewRoomName('');
         setShowNewRoomModal(false);
       }
@@ -385,6 +409,8 @@ export default function App() {
           return exists ? prev : [newDm, ...prev];
         });
         setActiveConversationId(newDm._id);
+        fetchHistory(newDm._id);
+        syncEngine.joinConversation(newDm._id);
         setTargetUsername('');
         setShowNewDmModal(false);
       }
@@ -698,7 +724,10 @@ export default function App() {
             return (
               <div
                 key={c._id}
-                onClick={() => setActiveConversationId(c._id)}
+                onClick={() => {
+                  setActiveConversationId(c._id);
+                  fetchHistory(c._id);
+                }}
                 className={`w-full text-left p-3 text-xs flex items-center justify-between group cursor-pointer transition ${
                   isSelected ? 'bg-zena-50 border-r-2 border-zena-600 font-semibold' : 'hover:bg-gray-100 text-gray-700'
                 }`}
