@@ -112,8 +112,8 @@ export async function editMessage({ conversationId, messageId, userId, newText }
   }
 
   const ageMs = Date.now() - new Date(message.createdAt).getTime();
-  if (ageMs > 15 * 60 * 1000) {
-    const err = new Error('Edit window (15 minutes) has expired');
+  if (ageMs > 24 * 60 * 60 * 1000) {
+    const err = new Error('Edit window (24 hours) has expired');
     err.statusCode = 400;
     throw err;
   }
@@ -148,8 +148,8 @@ export async function deleteMessage({ conversationId, messageId, userId }) {
   }
 
   const ageMs = Date.now() - new Date(message.createdAt).getTime();
-  if (ageMs > 15 * 60 * 1000) {
-    const err = new Error('Delete window (15 minutes) has expired');
+  if (ageMs > 24 * 60 * 60 * 1000) {
+    const err = new Error('Delete window (24 hours) has expired');
     err.statusCode = 400;
     throw err;
   }

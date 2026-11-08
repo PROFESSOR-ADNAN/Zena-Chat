@@ -1,5 +1,6 @@
 import { io, Socket } from 'socket.io-client';
 import { db, LocalMessage, OutboxItem } from '../db';
+import { apiFetch } from '../api';
 
 export type ConnectionState = 'connected' | 'connecting' | 'reconnecting' | 'offline';
 
@@ -10,7 +11,10 @@ export class SyncEngine {
   private eventBuffer: any[] = [];
   private stateListeners: Set<(state: ConnectionState) => void> = new Set();
   private conversationListeners: Set<(conv: any) => void> = new Set();
+  private conversationDeleteListeners: Set<(data: { conversationId: string }) => void> = new Set();
   private messageListeners: Set<(msg: any) => void> = new Set();
+  private messageEditListeners: Set<(msg: any) => void> = new Set();
+  private messageDeleteListeners: Set<(data: { _id: string; conversationId: string }) => void> = new Set();
   private currentState: ConnectionState = 'offline';
   private activeRoomId: string | null = null;
 
@@ -100,9 +104,24 @@ export class SyncEngine {
     return () => this.conversationListeners.delete(listener);
   }
 
+  public onConversationDelete(listener: (data: { conversationId: string }) => void) {
+    this.conversationDeleteListeners.add(listener);
+    return () => this.conversationDeleteListeners.delete(listener);
+  }
+
   public onMessageNew(listener: (msg: any) => void) {
     this.messageListeners.add(listener);
     return () => this.messageListeners.delete(listener);
+  }
+
+  public onMessageEdit(listener: (msg: any) => void) {
+    this.messageEditListeners.add(listener);
+    return () => this.messageEditListeners.delete(listener);
+  }
+
+  public onMessageDelete(listener: (data: { _id: string; conversationId: string }) => void) {
+    this.messageDeleteListeners.add(listener);
+    return () => this.messageDeleteListeners.delete(listener);
   }
 
   private updateState(state: ConnectionState) {
@@ -146,8 +165,26 @@ export class SyncEngine {
       await this.applyIncomingMessage(data);
     });
 
+    this.socket.on('message:edited', async (data: any) => {
+      await db.messages.update(data._id, {
+        text: data.text,
+        editedAt: data.editedAt,
+      });
+      this.messageEditListeners.forEach((l) => l(data));
+    });
+
+    this.socket.on('message:deleted', async (data: any) => {
+      await db.messages.delete(data._id);
+      this.messageDeleteListeners.forEach((l) => l(data));
+    });
+
     this.socket.on('conversation:new', (conv: any) => {
       this.conversationListeners.forEach((l) => l(conv));
+    });
+
+    this.socket.on('conversation:deleted', async (data: any) => {
+      await db.messages.where('conversationId').equals(data.conversationId).delete();
+      this.conversationDeleteListeners.forEach((l) => l(data));
     });
 
     this.socket.on('receipt:update', async (data: any) => {
@@ -279,6 +316,84 @@ export class SyncEngine {
     return clientMsgId;
   }
 
+  public async editMessage(conversationId: string, messageId: string, text: string): Promise<boolean> {
+    try {
+      if (!this.socket || !this.socket.connected) {
+        const res = await apiFetch(`/api/v1/conversations/${conversationId}/messages/${messageId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ text }),
+        });
+        if (res?._id) {
+          await db.messages.update(messageId, { text, editedAt: res.editedAt || new Date().toISOString() });
+          return true;
+        }
+        return false;
+      }
+
+      return new Promise((resolve) => {
+        this.socket!.emit('message:edit', { conversationId, messageId, text }, async (res: any) => {
+          if (res?.ok) {
+            await db.messages.update(messageId, {
+              text,
+              editedAt: res.message?.editedAt || new Date().toISOString(),
+            });
+            resolve(true);
+          } else {
+            // Fallback to REST
+            try {
+              const restRes = await apiFetch(`/api/v1/conversations/${conversationId}/messages/${messageId}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ text }),
+              });
+              if (restRes?._id) {
+                await db.messages.update(messageId, { text, editedAt: restRes.editedAt || new Date().toISOString() });
+                resolve(true);
+                return;
+              }
+            } catch {}
+            resolve(false);
+          }
+        });
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  public async deleteMessage(conversationId: string, messageId: string): Promise<boolean> {
+    try {
+      if (!this.socket || !this.socket.connected) {
+        await apiFetch(`/api/v1/conversations/${conversationId}/messages/${messageId}`, {
+          method: 'DELETE',
+        });
+        await db.messages.delete(messageId);
+        return true;
+      }
+
+      return new Promise((resolve) => {
+        this.socket!.emit('message:delete', { conversationId, messageId }, async (res: any) => {
+          if (res?.ok) {
+            await db.messages.delete(messageId);
+            resolve(true);
+          } else {
+            // Fallback to REST
+            try {
+              await apiFetch(`/api/v1/conversations/${conversationId}/messages/${messageId}`, {
+                method: 'DELETE',
+              });
+              await db.messages.delete(messageId);
+              resolve(true);
+              return;
+            } catch {}
+            resolve(false);
+          }
+        });
+      });
+    } catch {
+      return false;
+    }
+  }
+
   public async flushOutbox() {
     const items = await db.outbox.orderBy('createdAt').toArray();
     for (const item of items) {
@@ -310,7 +425,6 @@ export class SyncEngine {
           clearTimeout(timer);
           if (ack?.ok) {
             await db.outbox.delete(item.clientMsgId);
-            // Delete optimistic local record keyed by clientMsgId and replace with confirmed server record
             await db.messages.delete(item.clientMsgId);
             await db.messages.put({
               id: ack.serverMsgId,

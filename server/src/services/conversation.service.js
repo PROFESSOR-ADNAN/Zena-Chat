@@ -4,6 +4,15 @@ import Conversation from '../models/Conversation.js';
 // history over REST — one place decides "are you allowed in here",
 // instead of the check drifting between the two entry points.
 export const assertParticipant = (conversation, userId) => {
+  // All users are participants in group rooms and General Chat!
+  if (conversation.type === 'group') {
+    if (!conversation.participants.some((p) => (p?._id || p).toString() === userId.toString())) {
+      conversation.participants.push(userId);
+      conversation.save().catch(() => {});
+    }
+    return;
+  }
+
   const isParticipant = conversation.participants.some((p) => {
     const pId = p?._id ? p._id.toString() : p.toString();
     return pId === userId.toString();

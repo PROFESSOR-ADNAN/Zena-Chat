@@ -17,6 +17,8 @@ import {
   Plus,
   Users,
   UserPlus,
+  Pencil,
+  Trash2,
 } from 'lucide-react';
 import { db, LocalMessage } from './db';
 import { syncEngine, ConnectionState } from './sync/engine';
@@ -72,6 +74,10 @@ export default function App() {
   const [dmError, setDmError] = useState<string | null>(null);
   const [dmLoading, setDmLoading] = useState(false);
 
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState('');
+  const [isDeletingConv, setIsDeletingConv] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Reactive IndexedDB messages query with deduplication
@@ -108,6 +114,19 @@ export default function App() {
       });
     });
 
+    const unsubConvDel = syncEngine.onConversationDelete(({ conversationId }) => {
+      setConversations((prev) => {
+        const remaining = prev.filter((c) => c._id !== conversationId);
+        setActiveConversationId((current) => {
+          if (current === conversationId) {
+            return remaining.length > 0 ? remaining[0]._id : '';
+          }
+          return current;
+        });
+        return remaining;
+      });
+    });
+
     const unsubMsg = syncEngine.onMessageNew((newMsg) => {
       setConversations((prev) => {
         const exists = prev.some((c) => c._id === newMsg.conversationId);
@@ -120,6 +139,7 @@ export default function App() {
 
     return () => {
       unsubConv();
+      unsubConvDel();
       unsubMsg();
     };
   }, []);
@@ -383,6 +403,70 @@ export default function App() {
     }
   };
 
+  const handleStartEdit = (msg: LocalMessage) => {
+    setEditingMessageId(msg.id);
+    setEditingText(msg.text);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditingText('');
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent, msgId: string) => {
+    e.preventDefault();
+    if (!editingText.trim()) return;
+    const ok = await syncEngine.editMessage(activeConversationId, msgId, editingText.trim());
+    if (ok) {
+      setEditingMessageId(null);
+      setEditingText('');
+    } else {
+      alert('Failed to edit message');
+    }
+  };
+
+  const handleDeleteMessage = async (msgId: string) => {
+    if (!confirm('Are you sure you want to delete this message?')) return;
+    const ok = await syncEngine.deleteMessage(activeConversationId, msgId);
+    if (!ok) {
+      alert('Failed to delete message');
+    }
+  };
+
+  const handleDeleteConversation = async (convId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    const conv = conversations.find((c) => c._id === convId);
+    if (conv?.name === 'General Chat' && conv.type === 'group') {
+      alert('General Chat cannot be deleted.');
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to delete "${conv?.name || 'this conversation'}"? All its messages will be removed.`)) {
+      return;
+    }
+
+    setIsDeletingConv(true);
+    try {
+      await apiFetch(`/api/v1/conversations/${convId}`, { method: 'DELETE' });
+      await db.messages.where('conversationId').equals(convId).delete();
+
+      setConversations((prev) => {
+        const remaining = prev.filter((c) => c._id !== convId);
+        setActiveConversationId((current) => {
+          if (current === convId) {
+            return remaining.length > 0 ? remaining[0]._id : '';
+          }
+          return current;
+        });
+        return remaining;
+      });
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete conversation');
+    } finally {
+      setIsDeletingConv(false);
+    }
+  };
+
   const toggleLanguage = () => {
     const nextLang = i18n.language === 'en' ? 'am' : 'en';
     i18n.changeLanguage(nextLang);
@@ -620,25 +704,38 @@ export default function App() {
                 ?.join(', ') || 'Chat Room');
 
             return (
-              <button
+              <div
                 key={c._id}
                 onClick={() => setActiveConversationId(c._id)}
-                className={`w-full text-left p-3 text-xs flex items-center space-x-2.5 transition ${
+                className={`w-full text-left p-3 text-xs flex items-center justify-between group cursor-pointer transition ${
                   isSelected ? 'bg-zena-50 border-r-2 border-zena-600 font-semibold' : 'hover:bg-gray-100 text-gray-700'
                 }`}
               >
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                    isSelected ? 'bg-zena-600 text-white' : 'bg-gray-200 text-gray-600'
-                  }`}
-                >
-                  {c.type === 'group' ? <Users className="w-4 h-4" /> : <User className="w-4 h-4" />}
+                <div className="flex items-center space-x-2.5 min-w-0 flex-1">
+                  <div
+                    className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
+                      isSelected ? 'bg-zena-600 text-white' : 'bg-gray-200 text-gray-600'
+                    }`}
+                  >
+                    {c.type === 'group' ? <Users className="w-4 h-4" /> : <User className="w-4 h-4" />}
+                  </div>
+                  <div className="truncate flex-1 min-w-0">
+                    <p className="truncate font-medium">{title}</p>
+                    <p className="text-[10px] text-gray-400">{c.type === 'group' ? 'Group Room' : 'Direct Message'}</p>
+                  </div>
                 </div>
-                <div className="truncate flex-1">
-                  <p className="truncate font-medium">{title}</p>
-                  <p className="text-[10px] text-gray-400">{c.type === 'group' ? 'Group' : 'Direct Message'}</p>
-                </div>
-              </button>
+
+                {/* Delete button (for all chats except protected General Chat) */}
+                {c.name !== 'General Chat' && (
+                  <button
+                    onClick={(e) => handleDeleteConversation(c._id, e)}
+                    title="Delete Conversation"
+                    className="opacity-0 group-hover:opacity-100 p-1.5 text-gray-400 hover:text-red-600 hover:bg-gray-200 rounded transition shrink-0 ml-1"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
@@ -651,7 +748,19 @@ export default function App() {
           <div className="flex items-center space-x-3 truncate">
             <MessageSquare className="w-6 h-6 text-zena-100 shrink-0" />
             <div className="truncate">
-              <h1 className="text-sm font-bold tracking-tight truncate">{convTitle}</h1>
+              <div className="flex items-center space-x-2">
+                <h1 className="text-sm font-bold tracking-tight truncate">{convTitle}</h1>
+                {currentConv && currentConv.name !== 'General Chat' && (
+                  <button
+                    onClick={(e) => handleDeleteConversation(currentConv._id, e)}
+                    disabled={isDeletingConv}
+                    title="Delete Conversation"
+                    className="text-zena-300 hover:text-red-300 transition p-1 rounded"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
               <p className="text-[10px] text-zena-100">{t('appName')}</p>
             </div>
           </div>
@@ -743,6 +852,7 @@ export default function App() {
 
             {messages?.map((msg) => {
               const isMe = msg.senderId === currentUser._id || msg.senderId === 'self';
+              const isEditing = editingMessageId === msg.id;
               const timeFormatted = new Intl.DateTimeFormat('en-US', {
                 timeZone: 'Africa/Addis_Ababa',
                 hour: '2-digit',
@@ -752,10 +862,10 @@ export default function App() {
               return (
                 <div
                   key={msg.id || msg.clientMsgId}
-                  className={`flex flex-col ${isMe ? 'items-end' : 'items-start'}`}
+                  className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start'}`}
                 >
                   <div
-                    className={`max-w-[75%] rounded-2xl px-4 py-2 text-sm shadow-sm relative ${
+                    className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm relative ${
                       isMe
                         ? 'bg-zena-600 text-white rounded-br-xs'
                         : 'bg-white text-gray-900 rounded-bl-xs border border-gray-200'
@@ -766,15 +876,66 @@ export default function App() {
                         {msg.senderName}
                       </p>
                     )}
-                    <p className="break-words leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+
+                    {isEditing ? (
+                      <form onSubmit={(e) => handleSaveEdit(e, msg.id)} className="space-y-2 mt-1">
+                        <input
+                          type="text"
+                          autoFocus
+                          value={editingText}
+                          onChange={(e) => setEditingText(e.target.value)}
+                          className="w-full px-2.5 py-1 text-sm bg-white text-gray-900 rounded border border-gray-300 focus:outline-none focus:ring-2 focus:ring-zena-400"
+                        />
+                        <div className="flex justify-end space-x-1.5 text-xs">
+                          <button
+                            type="button"
+                            onClick={handleCancelEdit}
+                            className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 hover:bg-gray-300 transition"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={!editingText.trim()}
+                            className="px-2 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 transition"
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <p className="break-words leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                    )}
+
                     <div
-                      className={`text-[10px] mt-1 flex items-center justify-end space-x-1 ${
+                      className={`text-[10px] mt-1 flex items-center justify-end space-x-1.5 ${
                         isMe ? 'text-green-100' : 'text-gray-400'
                       }`}
                     >
+                      {msg.editedAt && <span className="italic opacity-80">(edited)</span>}
                       <span>{timeFormatted}</span>
                       {isMe && renderStatusIcon(msg.status)}
                     </div>
+
+                    {/* Edit / Delete action overlay on hover for my messages */}
+                    {isMe && !isEditing && (
+                      <div className="absolute -top-3.5 right-2 hidden group-hover:flex items-center space-x-1 bg-white border border-gray-200 rounded-md shadow-md px-1.5 py-0.5 z-10 text-gray-600">
+                        <button
+                          onClick={() => handleStartEdit(msg)}
+                          title="Edit Message"
+                          className="p-1 hover:text-zena-600 hover:bg-gray-100 rounded transition"
+                        >
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleDeleteMessage(msg.id)}
+                          title="Delete Message"
+                          className="p-1 hover:text-red-600 hover:bg-gray-100 rounded transition"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               );

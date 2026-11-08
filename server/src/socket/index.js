@@ -102,7 +102,9 @@ export const initSocket = (httpServer) => {
 
     // Auto-join all existing conversations for this user so they receive messages instantly
     try {
-      const userConvs = await Conversation.find({ participants: socket.user._id }).select('_id');
+      const userConvs = await Conversation.find({
+        $or: [{ participants: socket.user._id }, { type: 'group' }],
+      }).select('_id');
       for (const c of userConvs) {
         socket.join(c._id.toString());
       }
@@ -206,13 +208,16 @@ export const initSocket = (httpServer) => {
             createdAt: populated.createdAt.toISOString(),
           };
 
-          // Broadcast to conversation room across all replicas via Redis adapter
-          io.to(conversationId).emit('message:new', messageData);
-
-          // ALSO broadcast to each participant's personal room
-          for (const p of conversation.participants) {
-            const pId = p?._id ? p._id.toString() : p.toString();
-            io.to(`user:${pId}`).emit('message:new', messageData);
+          // If it's a group room or General Chat, broadcast to all users
+          if (conversation.type === 'group') {
+            io.emit('message:new', messageData);
+          } else {
+            // For DMs, broadcast to room and to both participants' personal rooms
+            io.to(conversationId).emit('message:new', messageData);
+            for (const p of conversation.participants) {
+              const pId = p?._id ? p._id.toString() : p.toString();
+              io.to(`user:${pId}`).emit('message:new', messageData);
+            }
           }
         }
 
@@ -223,6 +228,51 @@ export const initSocket = (httpServer) => {
           createdAt: populated.createdAt.toISOString(),
           isDuplicate,
         });
+      } catch (err) {
+        callback?.({ ok: false, message: err.message });
+      }
+    });
+
+    // Message edit event
+    socket.on('message:edit', async (payload = {}, callback) => {
+      try {
+        const { conversationId, messageId, text } = payload;
+        const updated = await editMessage({
+          conversationId,
+          messageId,
+          userId: socket.user._id,
+          newText: text,
+        });
+
+        const eventData = {
+          _id: updated._id,
+          conversationId,
+          text: updated.text,
+          editedAt: updated.editedAt?.toISOString?.() || new Date().toISOString(),
+        };
+
+        io.emit('message:edited', eventData);
+        callback?.({ ok: true, message: updated });
+      } catch (err) {
+        callback?.({ ok: false, message: err.message });
+      }
+    });
+
+    // Message delete event
+    socket.on('message:delete', async (payload = {}, callback) => {
+      try {
+        const { conversationId, messageId } = payload;
+        await deleteMessage({
+          conversationId,
+          messageId,
+          userId: socket.user._id,
+        });
+
+        io.emit('message:deleted', {
+          _id: messageId,
+          conversationId,
+        });
+        callback?.({ ok: true });
       } catch (err) {
         callback?.({ ok: false, message: err.message });
       }

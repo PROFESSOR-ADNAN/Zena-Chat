@@ -8,6 +8,7 @@ import {
   markDelivered,
 } from '../services/conversation.service.js';
 import { isUserOnline } from '../services/presence.service.js';
+import { editMessage, deleteMessage } from '../services/messaging.service.js';
 
 export const createDM = async (req, res, next) => {
   try {
@@ -97,10 +98,8 @@ export const createGroup = async (req, res, next) => {
 
     const io = req.app.get('io');
     if (io) {
-      for (const p of participants) {
-        const pId = p?._id ? p._id.toString() : p.toString();
-        io.to(`user:${pId}`).emit('conversation:new', populated);
-      }
+      // Broadcast new room to ALL users so it shows in everyone's sidebar
+      io.emit('conversation:new', populated);
     }
 
     res.status(201).json(populated);
@@ -111,47 +110,43 @@ export const createGroup = async (req, res, next) => {
 
 export const listMyConversations = async (req, res, next) => {
   try {
-    let conversations = await Conversation.find({ participants: req.user._id })
+    // 1. Always ensure General Chat exists and current user is a participant
+    let generalRoom = await Conversation.findOne({ name: 'General Chat', type: 'group' });
+    if (!generalRoom) {
+      generalRoom = await Conversation.create({
+        type: 'group',
+        name: 'General Chat',
+        participants: [req.user._id],
+        createdBy: req.user._id,
+        lastSeq: 0,
+        lastEventSeq: 0,
+      });
+    } else if (!generalRoom.participants.some((p) => (p?._id || p).toString() === req.user._id.toString())) {
+      generalRoom.participants.push(req.user._id);
+      await generalRoom.save();
+    }
+
+    await Membership.findOneAndUpdate(
+      { conversationId: generalRoom._id, userId: req.user._id },
+      {
+        $setOnInsert: {
+          conversationId: generalRoom._id,
+          userId: req.user._id,
+          role: 'member',
+          lastDeliveredSeq: 0,
+          lastReadSeq: 0,
+        },
+      },
+      { upsert: true }
+    );
+
+    // 2. Fetch all group rooms (channels) + direct messages where user is participant
+    const conversations = await Conversation.find({
+      $or: [{ participants: req.user._id }, { type: 'group' }],
+    })
       .sort('-updatedAt')
       .populate('participants', 'username displayName name lastSeenAt')
       .populate('lastMessage.sender', 'username displayName name');
-
-    // Auto-create/join default General Room if user has no conversations
-    if (conversations.length === 0) {
-      let generalRoom = await Conversation.findOne({ name: 'General Chat', type: 'group' });
-      if (!generalRoom) {
-        generalRoom = await Conversation.create({
-          type: 'group',
-          name: 'General Chat',
-          participants: [req.user._id],
-          createdBy: req.user._id,
-          lastSeq: 0,
-          lastEventSeq: 0,
-        });
-      } else if (!generalRoom.participants.some((p) => p.toString() === req.user._id.toString())) {
-        generalRoom.participants.push(req.user._id);
-        await generalRoom.save();
-      }
-
-      await Membership.findOneAndUpdate(
-        { conversationId: generalRoom._id, userId: req.user._id },
-        {
-          $setOnInsert: {
-            conversationId: generalRoom._id,
-            userId: req.user._id,
-            role: 'member',
-            lastDeliveredSeq: 0,
-            lastReadSeq: 0,
-          },
-        },
-        { upsert: true }
-      );
-
-      conversations = await Conversation.find({ participants: req.user._id })
-        .sort('-updatedAt')
-        .populate('participants', 'username displayName name lastSeenAt')
-        .populate('lastMessage.sender', 'username displayName name');
-    }
 
     const withPresence = await Promise.all(
       conversations.map(async (c) => {
@@ -259,6 +254,93 @@ export const syncConversations = async (req, res, next) => {
     );
 
     res.json({ syncedAt: new Date(), conversations: results });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const deleteConversation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const conversation = await Conversation.findById(id);
+    if (!conversation) {
+      return res.status(404).json({ message: 'Conversation not found' });
+    }
+
+    if (conversation.name === 'General Chat' && conversation.type === 'group') {
+      return res.status(400).json({ message: 'Cannot delete General Chat' });
+    }
+
+    await Conversation.findByIdAndDelete(id);
+    await Message.deleteMany({
+      $or: [{ conversationId: id }, { conversation: id }],
+    });
+    await Membership.deleteMany({ conversationId: id });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('conversation:deleted', { conversationId: id });
+    }
+
+    res.json({ ok: true, conversationId: id });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const editMessageController = async (req, res, next) => {
+  try {
+    const { id, messageId } = req.params;
+    const { text } = req.body;
+    if (!text?.trim()) {
+      return res.status(400).json({ message: 'Message text is required' });
+    }
+
+    const updated = await editMessage({
+      conversationId: id,
+      messageId,
+      userId: req.user._id,
+      newText: text.trim(),
+    });
+
+    const populated = await updated.populate('senderId', 'username displayName avatarUrl');
+
+    const io = req.app.get('io');
+    if (io) {
+      const payload = {
+        _id: populated._id,
+        conversationId: id,
+        text: populated.text,
+        editedAt: populated.editedAt?.toISOString?.() || new Date().toISOString(),
+      };
+      io.emit('message:edited', payload);
+    }
+
+    res.json(populated);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const deleteMessageController = async (req, res, next) => {
+  try {
+    const { id, messageId } = req.params;
+
+    await deleteMessage({
+      conversationId: id,
+      messageId,
+      userId: req.user._id,
+    });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('message:deleted', {
+        _id: messageId,
+        conversationId: id,
+      });
+    }
+
+    res.json({ ok: true, messageId });
   } catch (err) {
     next(err);
   }
