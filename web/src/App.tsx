@@ -108,6 +108,15 @@ export default function App() {
   // Listen to new conversations and new messages from socket in real-time
   useEffect(() => {
     const unsubConv = syncEngine.onConversationNew((newConv) => {
+      if (currentUser && newConv.participants) {
+        const isParticipant = newConv.participants.some((p: any) => {
+          const id = typeof p === 'object' && p ? p._id : p;
+          return id === currentUser._id;
+        });
+        if (!isParticipant && newConv.name !== 'General Chat') {
+          return;
+        }
+      }
       setConversations((prev) => {
         if (prev.some((c) => c._id === newConv._id)) return prev;
         return [newConv, ...prev];
@@ -230,29 +239,9 @@ export default function App() {
           }
           return list[0]._id;
         });
-      } else {
-        createInitialRoom();
       }
     } catch (err: any) {
       console.warn('Could not load conversations:', err.message);
-    }
-  };
-
-  const createInitialRoom = async () => {
-    try {
-      const newRoom = await apiFetch('/api/v1/conversations/group', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: 'General Chat',
-          participantIds: [],
-        }),
-      });
-      if (newRoom?._id) {
-        setConversations([newRoom]);
-        setActiveConversationId(newRoom._id);
-      }
-    } catch {
-      // Ignore if offline
     }
   };
 
@@ -363,7 +352,10 @@ export default function App() {
       });
 
       if (newRoom?._id) {
-        setConversations((prev) => [newRoom, ...prev]);
+        setConversations((prev) => {
+          const exists = prev.some((c) => c._id === newRoom._id);
+          return exists ? prev : [newRoom, ...prev];
+        });
         setActiveConversationId(newRoom._id);
         setNewRoomName('');
         setShowNewRoomModal(false);
@@ -970,8 +962,10 @@ export default function App() {
       {showNewRoomModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-5">
-            <h3 className="text-base font-bold text-gray-800 mb-1">Create New Room</h3>
-            <p className="text-xs text-gray-500 mb-3">Create a group chat room for your team or community.</p>
+            <h3 className="text-base font-bold text-gray-800 mb-1">Create or Join a Room</h3>
+            <p className="text-xs text-gray-500 mb-3">
+              Enter a room name. If the room already exists, you will join it. It will only appear for users who join this room.
+            </p>
             {roomError && (
               <div className="mb-3 p-2.5 bg-red-50 text-red-700 rounded text-xs border border-red-200">
                 {roomError}
@@ -986,7 +980,7 @@ export default function App() {
                   autoFocus
                   value={newRoomName}
                   onChange={(e) => setNewRoomName(e.target.value)}
-                  placeholder="e.g. Addis Ababa Tech"
+                  placeholder="e.g. Football Fans, Study Group"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
                 />
               </div>
@@ -1006,7 +1000,7 @@ export default function App() {
                   disabled={roomLoading || !newRoomName.trim()}
                   className="px-3 py-1.5 text-xs font-semibold bg-zena-600 text-white hover:bg-zena-700 rounded disabled:opacity-50"
                 >
-                  {roomLoading ? 'Creating...' : 'Create Room'}
+                  {roomLoading ? 'Connecting...' : 'Join / Create Room'}
                 </button>
               </div>
             </form>

@@ -63,46 +63,65 @@ export const createDM = async (req, res, next) => {
 export const createGroup = async (req, res, next) => {
   try {
     const { name, participantIds = [] } = req.body;
-    if (!name?.trim()) return res.status(400).json({ message: 'name is required' });
+    const trimmedName = name?.trim();
+    if (!trimmedName) return res.status(400).json({ message: 'name is required' });
 
-    // Deduplicated, always includes the creator
-    const participants = [...new Set([req.user._id.toString(), ...(participantIds || [])])];
-
-    const conversation = await Conversation.create({
+    // Look for an existing room with this name (case-insensitive)
+    const escaped = trimmedName.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+    let conversation = await Conversation.findOne({
       type: 'group',
-      name: name.trim(),
-      participants,
-      createdBy: req.user._id,
-      lastSeq: 0,
-      lastEventSeq: 0,
+      name: { $regex: `^${escaped}$`, $options: 'i' },
     });
 
-    for (const p of participants) {
-      await Membership.findOneAndUpdate(
-        { conversationId: conversation._id, userId: p },
-        {
-          $setOnInsert: {
-            conversationId: conversation._id,
-            userId: p,
-            role: p === req.user._id.toString() ? 'owner' : 'member',
-            lastDeliveredSeq: 0,
-            lastReadSeq: 0,
-          },
-        },
-        { upsert: true }
+    let isNew = false;
+    if (!conversation) {
+      // Room does not exist yet: create it with creator as participant
+      const participants = [...new Set([req.user._id.toString(), ...(participantIds || [])])];
+      conversation = await Conversation.create({
+        type: 'group',
+        name: trimmedName,
+        participants,
+        createdBy: req.user._id,
+        lastSeq: 0,
+        lastEventSeq: 0,
+      });
+      isNew = true;
+    } else {
+      // Room already exists: join it! Add current user if not already in participants
+      const alreadyIn = conversation.participants.some(
+        (p) => (p?._id || p).toString() === req.user._id.toString()
       );
+      if (!alreadyIn) {
+        conversation.participants.push(req.user._id);
+        await conversation.save();
+      }
     }
+
+    // Ensure membership record exists for this user
+    await Membership.findOneAndUpdate(
+      { conversationId: conversation._id, userId: req.user._id },
+      {
+        $setOnInsert: {
+          conversationId: conversation._id,
+          userId: req.user._id,
+          role: conversation.createdBy?.toString() === req.user._id.toString() ? 'owner' : 'member',
+          lastDeliveredSeq: 0,
+          lastReadSeq: 0,
+        },
+      },
+      { upsert: true }
+    );
 
     const populated = await Conversation.findById(conversation._id)
       .populate('participants', 'username displayName name lastSeenAt');
 
     const io = req.app.get('io');
     if (io) {
-      // Broadcast new room to ALL users so it shows in everyone's sidebar
-      io.emit('conversation:new', populated);
+      // Notify only the user who created/joined so it does NOT clutter other users' sidebars!
+      io.to(`user:${req.user._id}`).emit('conversation:new', populated);
     }
 
-    res.status(201).json(populated);
+    res.status(isNew ? 201 : 200).json(populated);
   } catch (err) {
     next(err);
   }
@@ -140,10 +159,9 @@ export const listMyConversations = async (req, res, next) => {
       { upsert: true }
     );
 
-    // 2. Fetch all group rooms (channels) + direct messages where user is participant
-    const conversations = await Conversation.find({
-      $or: [{ participants: req.user._id }, { type: 'group' }],
-    })
+    // 2. Fetch only conversations where current user is an active participant
+    // (General Chat is included because of step 1; separate rooms only show if user joined/created them)
+    const conversations = await Conversation.find({ participants: req.user._id })
       .sort('-updatedAt')
       .populate('participants', 'username displayName name lastSeenAt')
       .populate('lastMessage.sender', 'username displayName name');
@@ -279,7 +297,13 @@ export const deleteConversation = async (req, res, next) => {
 
     const io = req.app.get('io');
     if (io) {
-      io.emit('conversation:deleted', { conversationId: id });
+      if (conversation.participants) {
+        for (const p of conversation.participants) {
+          const pId = p?._id ? p._id.toString() : p.toString();
+          io.to(`user:${pId}`).emit('conversation:deleted', { conversationId: id });
+        }
+      }
+      io.to(id).emit('conversation:deleted', { conversationId: id });
     }
 
     res.json({ ok: true, conversationId: id });
@@ -313,7 +337,18 @@ export const editMessageController = async (req, res, next) => {
         text: populated.text,
         editedAt: populated.editedAt?.toISOString?.() || new Date().toISOString(),
       };
-      io.emit('message:edited', payload);
+      const conversation = await Conversation.findById(id);
+      if (conversation?.name === 'General Chat') {
+        io.emit('message:edited', payload);
+      } else {
+        io.to(id).emit('message:edited', payload);
+        if (conversation?.participants) {
+          for (const p of conversation.participants) {
+            const pId = p?._id ? p._id.toString() : p.toString();
+            io.to(`user:${pId}`).emit('message:edited', payload);
+          }
+        }
+      }
     }
 
     res.json(populated);
@@ -326,6 +361,8 @@ export const deleteMessageController = async (req, res, next) => {
   try {
     const { id, messageId } = req.params;
 
+    const conversation = await Conversation.findById(id);
+
     await deleteMessage({
       conversationId: id,
       messageId,
@@ -334,10 +371,21 @@ export const deleteMessageController = async (req, res, next) => {
 
     const io = req.app.get('io');
     if (io) {
-      io.emit('message:deleted', {
+      const payload = {
         _id: messageId,
         conversationId: id,
-      });
+      };
+      if (conversation?.name === 'General Chat') {
+        io.emit('message:deleted', payload);
+      } else {
+        io.to(id).emit('message:deleted', payload);
+        if (conversation?.participants) {
+          for (const p of conversation.participants) {
+            const pId = p?._id ? p._id.toString() : p.toString();
+            io.to(`user:${pId}`).emit('message:deleted', payload);
+          }
+        }
+      }
     }
 
     res.json({ ok: true, messageId });

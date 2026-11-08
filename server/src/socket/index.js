@@ -103,7 +103,7 @@ export const initSocket = (httpServer) => {
     // Auto-join all existing conversations for this user so they receive messages instantly
     try {
       const userConvs = await Conversation.find({
-        $or: [{ participants: socket.user._id }, { type: 'group' }],
+        $or: [{ participants: socket.user._id }, { name: 'General Chat' }],
       }).select('_id');
       for (const c of userConvs) {
         socket.join(c._id.toString());
@@ -208,11 +208,11 @@ export const initSocket = (httpServer) => {
             createdAt: populated.createdAt.toISOString(),
           };
 
-          // If it's a group room or General Chat, broadcast to all users
-          if (conversation.type === 'group') {
+          // If it's General Chat, broadcast to all users
+          if (conversation.name === 'General Chat') {
             io.emit('message:new', messageData);
           } else {
-            // For DMs, broadcast to room and to both participants' personal rooms
+            // For separate rooms and DMs, broadcast ONLY to room participants
             io.to(conversationId).emit('message:new', messageData);
             for (const p of conversation.participants) {
               const pId = p?._id ? p._id.toString() : p.toString();
@@ -251,7 +251,18 @@ export const initSocket = (httpServer) => {
           editedAt: updated.editedAt?.toISOString?.() || new Date().toISOString(),
         };
 
-        io.emit('message:edited', eventData);
+        const conversation = await Conversation.findById(conversationId);
+        if (conversation?.name === 'General Chat') {
+          io.emit('message:edited', eventData);
+        } else {
+          io.to(conversationId).emit('message:edited', eventData);
+          if (conversation?.participants) {
+            for (const p of conversation.participants) {
+              const pId = p?._id ? p._id.toString() : p.toString();
+              io.to(`user:${pId}`).emit('message:edited', eventData);
+            }
+          }
+        }
         callback?.({ ok: true, message: updated });
       } catch (err) {
         callback?.({ ok: false, message: err.message });
@@ -268,10 +279,23 @@ export const initSocket = (httpServer) => {
           userId: socket.user._id,
         });
 
-        io.emit('message:deleted', {
+        const delData = {
           _id: messageId,
           conversationId,
-        });
+        };
+
+        const conversation = await Conversation.findById(conversationId);
+        if (conversation?.name === 'General Chat') {
+          io.emit('message:deleted', delData);
+        } else {
+          io.to(conversationId).emit('message:deleted', delData);
+          if (conversation?.participants) {
+            for (const p of conversation.participants) {
+              const pId = p?._id ? p._id.toString() : p.toString();
+              io.to(`user:${pId}`).emit('message:deleted', delData);
+            }
+          }
+        }
         callback?.({ ok: true });
       } catch (err) {
         callback?.({ ok: false, message: err.message });
