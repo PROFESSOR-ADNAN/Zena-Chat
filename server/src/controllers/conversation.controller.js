@@ -346,12 +346,6 @@ export const syncConversations = async (req, res, next) => {
   }
 };
 
-    res.json({ syncedAt: new Date(), conversations: results });
-  } catch (err) {
-    next(err);
-  }
-};
-
 export const deleteConversation = async (req, res, next) => {
   try {
     const { id } = req.params;
