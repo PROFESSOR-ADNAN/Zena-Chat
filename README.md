@@ -57,7 +57,7 @@ graph TD
 ```bash
 # Clone the repository
 git clone https://github.com/PROFESSOR-ADNAN/Zena-Chat.git
-cd ZenaChat-pp2
+cd Zena-Chat-pp2
 
 # Copy environment variables
 cp .env.example server/.env
