@@ -19,6 +19,8 @@ import {
   UserPlus,
   Pencil,
   Trash2,
+  X,
+  Bell,
 } from 'lucide-react';
 import { db, LocalMessage } from './db';
 import { syncEngine, ConnectionState } from './sync/engine';
@@ -37,7 +39,80 @@ interface ConversationItem {
   type: 'dm' | 'group';
   name?: string;
   unreadCount?: number;
+  lastMessageAt?: string;
+  lastMessage?: {
+    text?: string;
+    sender?: {
+      _id?: string;
+      displayName?: string;
+      username?: string;
+      name?: string;
+    };
+    sentAt?: string;
+  };
   participants: Array<{ _id: string; username?: string; displayName?: string; name?: string }>;
+}
+
+interface NotificationToast {
+  id: string;
+  conversationId: string;
+  senderName: string;
+  conversationTitle: string;
+  text: string;
+}
+
+function formatTelegramTime(dateStr?: string): string {
+  if (!dateStr) return '';
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) return '';
+  const now = new Date();
+  const isToday =
+    date.getDate() === now.getDate() &&
+    date.getMonth() === now.getMonth() &&
+    date.getFullYear() === now.getFullYear();
+
+  if (isToday) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const isYesterday =
+    date.getDate() === yesterday.getDate() &&
+    date.getMonth() === yesterday.getMonth() &&
+    date.getFullYear() === yesterday.getFullYear();
+
+  if (isYesterday) {
+    return 'Yesterday';
+  }
+
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function playNotificationChime() {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(587.33, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.08);
+
+    gain.gain.setValueAtTime(0.2, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start();
+    osc.stop(ctx.currentTime + 0.35);
+  } catch {}
 }
 
 export default function App() {
@@ -79,12 +154,48 @@ export default function App() {
   const [editingText, setEditingText] = useState('');
   const [isDeletingConv, setIsDeletingConv] = useState(false);
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
+  const [activeToast, setActiveToast] = useState<NotificationToast | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConvIdRef = useRef(activeConversationId);
   useEffect(() => {
     activeConvIdRef.current = activeConversationId;
   }, [activeConversationId]);
+
+  // Unlock Web Audio on first user interaction so notification sound can play freely
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          ctx.resume().catch(() => {});
+        }
+      } catch {}
+      window.removeEventListener('click', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+    window.addEventListener('click', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('click', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
+  // Auto-dismiss top banner notification toast after 5 seconds
+  useEffect(() => {
+    if (!activeToast) return;
+    const t = setTimeout(() => setActiveToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [activeToast]);
+
+  // Request browser desktop notification permission when logged in
+  useEffect(() => {
+    if (currentUser && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  }, [currentUser]);
 
   // Dynamic page title with total unread count (Telegram-style)
   useEffect(() => {
@@ -153,20 +264,81 @@ export default function App() {
     });
 
     const unsubMsg = syncEngine.onMessageNew((newMsg) => {
+      const convId = String(newMsg.conversationId);
+      const isFromMe =
+        String(newMsg.senderId?._id || newMsg.senderId) === String(currentUser?._id) ||
+        newMsg.senderUsername === currentUser?.username;
+
+      // Update conversations list in-place: update lastMessage and re-sort (Telegram-style)
       setConversations((prev) => {
-        const exists = prev.some((c) => c._id === newMsg.conversationId);
-        if (!exists) {
+        const index = prev.findIndex((c) => String(c._id) === convId);
+        if (index === -1) {
           loadConversations();
+          return prev;
         }
-        return prev;
+
+        const updated = [...prev];
+        const target = { ...updated[index] };
+        target.lastMessage = {
+          text: newMsg.text || '[Attachment]',
+          sender: {
+            _id: newMsg.senderId?._id || newMsg.senderId,
+            displayName: newMsg.senderDisplayName || newMsg.senderUsername,
+            username: newMsg.senderUsername,
+          },
+          sentAt: newMsg.createdAt,
+        };
+        target.lastMessageAt = newMsg.createdAt;
+
+        // Keep General Chat pinned at index 0, move this active conversation to top of others
+        const without = updated.filter((c) => String(c._id) !== convId);
+        if (target.name?.toLowerCase().trim() === 'general chat') {
+          return [target, ...without];
+        } else {
+          const generalIdx = without.findIndex((c) => c.name?.toLowerCase().trim() === 'general chat');
+          if (generalIdx >= 0) {
+            const general = without[generalIdx];
+            const others = without.filter((_, i) => i !== generalIdx);
+            return [general, target, ...others];
+          }
+          return [target, ...without];
+        }
       });
 
       // Telegram-style unread notification
-      if (newMsg.conversationId !== activeConvIdRef.current) {
+      const isCurrentlyViewing = convId === String(activeConvIdRef.current) && document.visibilityState === 'visible';
+      if (!isFromMe && !isCurrentlyViewing) {
         setUnreadCounts((prev) => ({
           ...prev,
-          [newMsg.conversationId]: (prev[newMsg.conversationId] || 0) + 1,
+          [convId]: (prev[convId] || 0) + 1,
         }));
+      }
+
+      // Audio notification and visual banner for incoming messages from others
+      if (!isFromMe) {
+        playNotificationChime();
+
+        setConversations((currentConvs) => {
+          const conv = currentConvs.find((c) => String(c._id) === convId);
+          const title = conv?.name || newMsg.senderDisplayName || newMsg.senderUsername || 'New Message';
+          setActiveToast({
+            id: newMsg._id || crypto.randomUUID(),
+            conversationId: convId,
+            senderName: newMsg.senderDisplayName || newMsg.senderUsername || 'Someone',
+            conversationTitle: title,
+            text: newMsg.text || 'Sent an attachment',
+          });
+          return currentConvs;
+        });
+
+        if ('Notification' in window && Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+          try {
+            new Notification(`${newMsg.senderDisplayName || newMsg.senderUsername || 'Zena Chat'}`, {
+              body: newMsg.text || 'New message received',
+              icon: '/vite.svg',
+            });
+          } catch {}
+        }
       }
     });
 
@@ -279,16 +451,24 @@ export default function App() {
       setConversations(list);
 
       if (list.length > 0) {
-        const counts: Record<string, number> = {};
+        const serverCounts: Record<string, number> = {};
         for (const c of list) {
-          counts[c._id] = c.unreadCount || 0;
+          serverCounts[c._id] = c.unreadCount || 0;
         }
-        setUnreadCounts((prev) => ({ ...counts, ...prev, [activeConvIdRef.current || list[0]._id]: 0 }));
 
-        setActiveConversationId((prev) => {
-          const nextId = prev && list.some((c: ConversationItem) => c._id === prev) ? prev : list[0]._id;
-          fetchHistory(nextId);
-          return nextId;
+        const currentActive = activeConvIdRef.current;
+        const nextId =
+          currentActive && list.some((c: ConversationItem) => c._id === currentActive)
+            ? currentActive
+            : list[0]._id;
+
+        setActiveConversationId(nextId);
+        fetchHistory(nextId);
+
+        setUnreadCounts((prev) => {
+          const merged = { ...serverCounts, ...prev };
+          if (nextId) merged[nextId] = 0;
+          return merged;
         });
       }
     } catch (err: any) {
@@ -670,7 +850,44 @@ export default function App() {
       ?.join(', ') || 'Chat Room');
 
   return (
-    <div className="flex h-screen max-w-5xl mx-auto bg-white shadow-xl overflow-hidden border-x border-gray-200">
+    <div className="relative flex h-screen max-w-5xl mx-auto bg-white shadow-xl overflow-hidden border-x border-gray-200">
+      {/* Floating Telegram-Style Toast Notification */}
+      {activeToast && (
+        <div
+          onClick={() => {
+            setActiveConversationId(activeToast.conversationId);
+            fetchHistory(activeToast.conversationId);
+            setUnreadCounts((prev) => ({ ...prev, [activeToast.conversationId]: 0 }));
+            syncEngine.markAsRead(activeToast.conversationId);
+            setActiveToast(null);
+          }}
+          className="fixed top-4 right-4 z-50 bg-white border border-zena-200 shadow-2xl rounded-xl p-3 flex items-start space-x-3 max-w-xs sm:max-w-sm cursor-pointer hover:bg-zena-50/60 transition-all duration-200 border-l-4 border-l-zena-600"
+        >
+          <div className="w-8 h-8 rounded-full bg-zena-600 text-white flex items-center justify-center shrink-0 font-bold text-xs shadow-xs">
+            <Bell className="w-4 h-4" />
+          </div>
+          <div className="flex-1 min-w-0 pr-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-gray-900 truncate">{activeToast.conversationTitle}</span>
+              <span className="text-[9px] text-zena-600 font-bold uppercase tracking-wider shrink-0 ml-1">New Message</span>
+            </div>
+            <p className="text-[11px] text-gray-600 truncate mt-0.5">
+              <span className="text-gray-900 font-semibold">{activeToast.senderName}: </span>
+              {activeToast.text}
+            </p>
+          </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setActiveToast(null);
+            }}
+            className="text-gray-400 hover:text-gray-600 p-0.5 rounded shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Left Sidebar: Conversations */}
       <aside className="w-72 bg-gray-50 border-r border-gray-200 flex flex-col">
         {/* User Profile Header */}
@@ -743,12 +960,22 @@ export default function App() {
 
           {conversations.map((c) => {
             const isSelected = c._id === activeConversationId;
+            const count = unreadCounts[c._id] || 0;
             const title =
               c.name ||
               (c.participants
                 ?.filter((p) => p._id !== currentUser._id)
                 ?.map((p) => p.displayName || p.username || p.name)
                 ?.join(', ') || 'Chat Room');
+
+            const lastSender = c.lastMessage?.sender?.displayName || c.lastMessage?.sender?.username;
+            const lastSnippet = c.lastMessage?.text
+              ? `${lastSender ? `${lastSender}: ` : ''}${c.lastMessage.text}`
+              : c.type === 'group'
+              ? 'Group Room'
+              : 'Direct Message';
+
+            const timeFormatted = formatTelegramTime(c.lastMessage?.sentAt || c.lastMessageAt);
 
             return (
               <div
@@ -760,29 +987,60 @@ export default function App() {
                   syncEngine.markAsRead(c._id);
                 }}
                 className={`w-full text-left p-3 text-xs flex items-center justify-between group cursor-pointer transition ${
-                  isSelected ? 'bg-zena-50 border-r-2 border-zena-600 font-semibold' : 'hover:bg-gray-100 text-gray-700'
+                  isSelected ? 'bg-zena-50 border-r-2 border-zena-600' : 'hover:bg-gray-100 text-gray-700'
                 }`}
               >
                 <div className="flex items-center space-x-2.5 min-w-0 flex-1">
                   <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-                      isSelected ? 'bg-zena-600 text-white' : 'bg-gray-200 text-gray-600'
+                    className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 font-bold text-xs ${
+                      isSelected ? 'bg-zena-600 text-white' : 'bg-gray-200 text-gray-700'
                     }`}
                   >
-                    {c.type === 'group' ? <Users className="w-4 h-4" /> : <User className="w-4 h-4" />}
+                    {c.type === 'group' ? (
+                      c.name === 'General Chat' ? '🌍' : <Users className="w-4 h-4" />
+                    ) : (
+                      <User className="w-4 h-4" />
+                    )}
                   </div>
-                  <div className="truncate flex-1 min-w-0">
-                    <p className="truncate font-medium">{title}</p>
-                    <p className="text-[10px] text-gray-400">{c.type === 'group' ? 'Group Room' : 'Direct Message'}</p>
+                  <div className="truncate flex-1 min-w-0 pr-1">
+                    <div className="flex items-center justify-between">
+                      <p
+                        className={`truncate text-xs ${
+                          count > 0 && !isSelected
+                            ? 'font-bold text-gray-900'
+                            : isSelected
+                            ? 'font-bold text-zena-800'
+                            : 'font-semibold text-gray-800'
+                        }`}
+                      >
+                        {title}
+                      </p>
+                      {timeFormatted && (
+                        <span
+                          className={`text-[10px] ml-1 shrink-0 ${
+                            count > 0 && !isSelected ? 'text-zena-600 font-bold' : 'text-gray-400'
+                          }`}
+                        >
+                          {timeFormatted}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between mt-0.5">
+                      <p
+                        className={`truncate text-[11px] ${
+                          count > 0 && !isSelected ? 'text-gray-900 font-semibold' : 'text-gray-500'
+                        }`}
+                      >
+                        {lastSnippet}
+                      </p>
+                      {count > 0 && !isSelected && (
+                        <span className="shrink-0 ml-1.5 px-1.5 py-0.5 text-[10px] font-bold bg-zena-600 text-white rounded-full min-w-[20px] text-center shadow-xs">
+                          {count > 99 ? '99+' : count}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-
-                {/* Telegram-style Unread Message Badge */}
-                {(unreadCounts[c._id] || 0) > 0 && !isSelected && (
-                  <span className="shrink-0 ml-1.5 px-2 py-0.5 text-[10px] font-bold bg-zena-600 text-white rounded-full min-w-[20px] text-center shadow-xs">
-                    {(unreadCounts[c._id] || 0) > 99 ? '99+' : unreadCounts[c._id]}
-                  </span>
-                )}
 
                 {/* Delete button (for all chats except protected General Chat) */}
                 {c.name !== 'General Chat' && (

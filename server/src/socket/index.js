@@ -215,12 +215,13 @@ export const initSocket = (httpServer) => {
           if (conversation.name?.toLowerCase().trim() === 'general chat') {
             io.emit('message:new', messageData);
           } else {
-            // For separate rooms and DMs, broadcast ONLY to room participants
-            io.to(conversationId).emit('message:new', messageData);
+            // For separate rooms and DMs, broadcast to room & user rooms without duplicating
+            let target = io.to(conversationId);
             for (const p of conversation.participants) {
-              const pId = p?._id ? p._id.toString() : p.toString();
-              io.to(`user:${pId}`).emit('message:new', messageData);
+              const pId = (p?._id || p).toString();
+              target = target.to(`user:${pId}`);
             }
+            target.emit('message:new', messageData);
           }
         }
 

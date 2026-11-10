@@ -164,10 +164,6 @@ export class SyncEngine {
     });
 
     this.socket.on('message:new', async (data: any) => {
-      if (this.isSyncing) {
-        this.eventBuffer.push({ type: 'message', data });
-        return;
-      }
       await this.applyIncomingMessage(data);
     });
 
@@ -209,7 +205,12 @@ export class SyncEngine {
         cursorMap[c.conversationId] = c.lastEventSeq;
       });
 
+      const syncTimer = setTimeout(() => {
+        this.isSyncing = false;
+      }, 5000);
+
       this.socket.emit('sync:request', { cursors: cursorMap }, async (res: any) => {
+        clearTimeout(syncTimer);
         if (res?.ok && Array.isArray(res.events)) {
           for (const ev of res.events) {
             if (ev.type === 'message') {
