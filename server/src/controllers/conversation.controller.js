@@ -167,8 +167,19 @@ export const createGroup = async (req, res, next) => {
 
     const io = req.app.get('io');
     if (io) {
-      // Notify only the user who created/joined so it does NOT clutter other users' sidebars!
+      // Notify the user who created/joined so it adds to their sidebar
       io.to(`user:${req.user._id}`).emit('conversation:new', populatedObj);
+
+      // If an existing room was joined, notify remaining participants so member count updates in real time
+      if (!isNew && conversation.participants) {
+        for (const p of conversation.participants) {
+          const pId = (p?._id || p).toString();
+          if (pId !== req.user._id.toString()) {
+            io.to(`user:${pId}`).emit('conversation:updated', populatedObj);
+          }
+        }
+        io.to(conversation._id).emit('conversation:updated', populatedObj);
+      }
     }
 
     res.status(isNew ? 201 : 200).json(populatedObj);
@@ -396,24 +407,74 @@ export const deleteConversation = async (req, res, next) => {
       return res.status(400).json({ message: 'Cannot delete General Chat' });
     }
 
-    await Conversation.findByIdAndDelete(id);
-    await Message.deleteMany({
-      $or: [{ conversationId: id }, { conversation: id }],
-    });
-    await Membership.deleteMany({ conversationId: id });
-
-    const io = req.app.get('io');
-    if (io) {
-      if (conversation.participants) {
-        for (const p of conversation.participants) {
-          const pId = p?._id ? p._id.toString() : p.toString();
-          io.to(`user:${pId}`).emit('conversation:deleted', { conversationId: id });
-        }
-      }
-      io.to(id).emit('conversation:deleted', { conversationId: id });
+    // Check if requesting user is a participant
+    const isParticipant =
+      conversation.participants.some(
+        (p) => (p?._id || p).toString() === req.user._id.toString()
+      ) || (await Membership.exists({ conversationId: id, userId: req.user._id }));
+    if (!isParticipant) {
+      return res.status(403).json({ message: 'You are not a participant in this conversation' });
     }
 
-    res.json({ ok: true, conversationId: id });
+    // 1. Delete this user's membership in this conversation
+    await Membership.deleteOne({ conversationId: id, userId: req.user._id });
+
+    // 2. Remove this user from the conversation participants
+    conversation.participants = conversation.participants.filter(
+      (p) => (p?._id || p).toString() !== req.user._id.toString()
+    );
+
+    const remainingCount = conversation.participants.length;
+    const io = req.app.get('io');
+
+    if (remainingCount === 0) {
+      // LAST USER DELETED THE CONVERSATION: Permanently delete once and forever!
+      await Conversation.findByIdAndDelete(id);
+      await Message.deleteMany({
+        $or: [{ conversationId: id }, { conversation: id }],
+      });
+      await Membership.deleteMany({ conversationId: id });
+
+      if (io) {
+        io.to(`user:${req.user._id}`).emit('conversation:deleted', { conversationId: id });
+        io.to(id).emit('conversation:deleted', { conversationId: id });
+      }
+
+      return res.json({ ok: true, conversationId: id, permanentlyDeleted: true });
+    } else {
+      // Other participants remain: Save conversation without this user
+      await conversation.save();
+
+      if (io) {
+        // Emit deletion ONLY to this user
+        io.to(`user:${req.user._id}`).emit('conversation:deleted', { conversationId: id });
+
+        // Notify remaining participants with updated conversation and participant list
+        const populated = await Conversation.findById(id)
+          .populate('participants', 'username displayName name lastSeenAt')
+          .populate('lastMessage.sender', 'username displayName name');
+
+        if (populated) {
+          const withPresence = {
+            ...populated.toObject(),
+            participants: await Promise.all(
+              (populated.participants || []).map(async (p) => ({
+                ...p.toObject(),
+                isOnline: await isUserOnline(p._id),
+              }))
+            ),
+          };
+
+          for (const p of conversation.participants) {
+            const pId = (p?._id || p).toString();
+            io.to(`user:${pId}`).emit('conversation:updated', withPresence);
+          }
+          io.to(id).emit('conversation:updated', withPresence);
+        }
+      }
+
+      return res.json({ ok: true, conversationId: id, remainingCount });
+    }
   } catch (err) {
     next(err);
   }

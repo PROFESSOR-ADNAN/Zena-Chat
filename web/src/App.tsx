@@ -52,7 +52,7 @@ interface ConversationItem {
     };
     sentAt?: string;
   };
-  participants: Array<{ _id: string; username?: string; displayName?: string; name?: string }>;
+  participants: Array<{ _id: string; username?: string; displayName?: string; name?: string; isOnline?: boolean }>;
 }
 
 interface NotificationToast {
@@ -343,6 +343,28 @@ export default function App() {
       });
     });
 
+    const unsubConvUpd = syncEngine.onConversationUpdate((updatedConv) => {
+      setConversations((prev) =>
+        prev.map((c) => (c._id === updatedConv._id ? { ...c, ...updatedConv } : c))
+      );
+    });
+
+    const unsubPresence = syncEngine.onPresenceUpdate(({ userId, isOnline }) => {
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (!c.participants) return c;
+          const hasUser = c.participants.some((p: any) => (p._id || p) === userId);
+          if (!hasUser) return c;
+          return {
+            ...c,
+            participants: c.participants.map((p: any) =>
+              (p._id || p) === userId ? { ...p, isOnline } : p
+            ),
+          };
+        })
+      );
+    });
+
     const unsubMsg = syncEngine.onMessageNew((newMsg) => {
       const convId = String(newMsg.conversationId);
       const isFromMe =
@@ -424,6 +446,8 @@ export default function App() {
 
     return () => {
       unsubConv();
+      unsubConvUpd();
+      unsubPresence();
       unsubConvDel();
       unsubMsg();
     };
@@ -858,7 +882,14 @@ export default function App() {
       return;
     }
 
-    if (!confirm(`Are you sure you want to delete "${conv?.name || 'this conversation'}"? All its messages will be removed.`)) {
+    const participantCount = conv?.participants?.length || 0;
+    const isLast = participantCount <= 1;
+
+    const confirmMsg = isLast
+      ? `Are you sure you want to delete "${conv?.name || 'this conversation'}"? You are the last person in this conversation, so it will be permanently deleted forever.`
+      : `Are you sure you want to delete "${conv?.name || 'this conversation'}"? It will be removed from your chat list, but other participants will still have access.`;
+
+    if (!confirm(confirmMsg)) {
       return;
     }
 
@@ -1188,17 +1219,24 @@ export default function App() {
                   </div>
                   <div className="truncate flex-1 min-w-0 pr-1">
                     <div className="flex items-center justify-between">
-                      <p
-                        className={`truncate text-xs ${
-                          count > 0 && !isSelected
-                            ? 'font-bold text-gray-900'
-                            : isSelected
-                            ? 'font-bold text-zena-800'
-                            : 'font-semibold text-gray-800'
-                        }`}
-                      >
-                        {title}
-                      </p>
+                      <div className="flex items-center min-w-0 truncate">
+                        <p
+                          className={`truncate text-xs ${
+                            count > 0 && !isSelected
+                              ? 'font-bold text-gray-900'
+                              : isSelected
+                              ? 'font-bold text-zena-800'
+                              : 'font-semibold text-gray-800'
+                          }`}
+                        >
+                          {title}
+                        </p>
+                        {c.participants && c.participants.length > 0 && (
+                          <span className="text-[10px] text-gray-400 font-normal ml-1 shrink-0">
+                            ({c.participants.length})
+                          </span>
+                        )}
+                      </div>
                       {timeFormatted && (
                         <span
                           className={`text-[10px] ml-1 shrink-0 ${
@@ -1258,6 +1296,15 @@ export default function App() {
             <div className="truncate">
               <div className="flex items-center space-x-2">
                 <h1 className="text-sm font-bold tracking-tight truncate">{convTitle}</h1>
+                {currentConv && (
+                  <span
+                    className="px-2 py-0.5 rounded-full bg-zena-800/80 text-zena-200 text-[10px] font-semibold flex items-center gap-1 border border-zena-600/50 shadow-2xs shrink-0"
+                    title={`${currentConv.participants?.length || 0} participants`}
+                  >
+                    <Users className="w-3 h-3 text-zena-300" />
+                    <span>{currentConv.participants?.length || 0}</span>
+                  </span>
+                )}
                 {currentConv && currentConv.name !== 'General Chat' && (
                   <button
                     onClick={(e) => handleDeleteConversation(currentConv._id, e)}
@@ -1269,7 +1316,32 @@ export default function App() {
                   </button>
                 )}
               </div>
-              <p className="text-[10px] text-zena-100">{t('appName')}</p>
+              {currentConv ? (
+                <div className="flex items-center space-x-2 text-[10px] text-zena-200 mt-0.5">
+                  <span>
+                    {(currentConv.participants?.length || 0) === 1
+                      ? '1 person'
+                      : `${currentConv.participants?.length || 0} people`}
+                  </span>
+                  {(() => {
+                    const onlineCount =
+                      currentConv.participants?.filter(
+                        (p) => p.isOnline && p._id !== currentUser?._id
+                      )?.length || 0;
+                    return onlineCount > 0 ? (
+                      <>
+                        <span>•</span>
+                        <span className="text-emerald-300 flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          {onlineCount} online
+                        </span>
+                      </>
+                    ) : null;
+                  })()}
+                </div>
+              ) : (
+                <p className="text-[10px] text-zena-100">{t('appName')}</p>
+              )}
             </div>
           </div>
 

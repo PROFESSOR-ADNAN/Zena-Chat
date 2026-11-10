@@ -70,7 +70,19 @@ export const findOrCreateDM = async (userId, otherUserId) => {
   const dmKey = [userId.toString(), otherUserId.toString()].sort().join('_');
 
   const existing = await Conversation.findOne({ dmKey });
-  if (existing) return existing;
+  if (existing) {
+    let modified = false;
+    for (const u of [userId, otherUserId]) {
+      if (!existing.participants.some((p) => (p?._id || p).toString() === u.toString())) {
+        existing.participants.push(u);
+        modified = true;
+      }
+    }
+    if (modified) {
+      await existing.save();
+    }
+    return existing;
+  }
 
   try {
     return await Conversation.create({ type: 'dm', participants: [userId, otherUserId], dmKey });

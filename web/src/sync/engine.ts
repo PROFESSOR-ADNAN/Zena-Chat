@@ -11,7 +11,9 @@ export class SyncEngine {
   private eventBuffer: any[] = [];
   private stateListeners: Set<(state: ConnectionState) => void> = new Set();
   private conversationListeners: Set<(conv: any) => void> = new Set();
+  private conversationUpdateListeners: Set<(conv: any) => void> = new Set();
   private conversationDeleteListeners: Set<(data: { conversationId: string }) => void> = new Set();
+  private presenceListeners: Set<(data: { userId: string; isOnline: boolean }) => void> = new Set();
   private messageListeners: Set<(msg: any) => void> = new Set();
   private messageEditListeners: Set<(msg: any) => void> = new Set();
   private messageDeleteListeners: Set<(data: { _id: string; conversationId: string }) => void> = new Set();
@@ -115,6 +117,16 @@ export class SyncEngine {
     return () => this.conversationDeleteListeners.delete(listener);
   }
 
+  public onConversationUpdate(listener: (conv: any) => void) {
+    this.conversationUpdateListeners.add(listener);
+    return () => this.conversationUpdateListeners.delete(listener);
+  }
+
+  public onPresenceUpdate(listener: (data: { userId: string; isOnline: boolean }) => void) {
+    this.presenceListeners.add(listener);
+    return () => this.presenceListeners.delete(listener);
+  }
+
   public onMessageNew(listener: (msg: any) => void) {
     this.messageListeners.add(listener);
     return () => this.messageListeners.delete(listener);
@@ -184,6 +196,10 @@ export class SyncEngine {
       this.conversationListeners.forEach((l) => l(conv));
     });
 
+    this.socket.on('conversation:updated', (conv: any) => {
+      this.conversationUpdateListeners.forEach((l) => l(conv));
+    });
+
     this.socket.on('conversation:deleted', async (data: any) => {
       await db.messages.where('conversationId').equals(data.conversationId).delete();
       this.conversationDeleteListeners.forEach((l) => l(data));
@@ -191,6 +207,16 @@ export class SyncEngine {
 
     this.socket.on('receipt:update', async (data: any) => {
       await this.applyReceiptUpdate(data);
+    });
+
+    this.socket.on('presence:snapshot', (snapshot: Array<{ userId: string; isOnline: boolean }>) => {
+      if (Array.isArray(snapshot)) {
+        snapshot.forEach((item) => this.presenceListeners.forEach((l) => l(item)));
+      }
+    });
+
+    this.socket.on('presence:update', (data: { userId: string; isOnline: boolean }) => {
+      this.presenceListeners.forEach((l) => l(data));
     });
   }
 
