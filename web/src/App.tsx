@@ -168,6 +168,10 @@ export default function App() {
   const activeConvIdRef = useRef(activeConversationId);
   const positionedConvIdRef = useRef<string | null>(null);
 
+  // Exact scroll memory per conversation (saves where user was when leaving)
+  const scrollPosMapRef = useRef<Record<string, number>>({});
+  const wasNearBottomMapRef = useRef<Record<string, boolean>>({});
+
   useEffect(() => {
     activeConvIdRef.current = activeConversationId;
     positionedConvIdRef.current = null;
@@ -176,6 +180,14 @@ export default function App() {
 
   const selectConversation = (convId: string) => {
     if (!convId) return;
+
+    // Save exact position for the conversation we are exiting
+    if (activeConversationId && messagesContainerRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+      scrollPosMapRef.current[activeConversationId] = scrollTop;
+      wasNearBottomMapRef.current[activeConversationId] = scrollHeight - scrollTop - clientHeight < 80;
+    }
+
     positionedConvIdRef.current = null;
     setShowScrollBottom(false);
 
@@ -194,6 +206,12 @@ export default function App() {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
     const nearBottom = distanceFromBottom < 80;
+
+    if (activeConversationId) {
+      scrollPosMapRef.current[activeConversationId] = scrollTop;
+      wasNearBottomMapRef.current[activeConversationId] = nearBottom;
+    }
+
     setShowScrollBottom(!nearBottom);
 
     if (nearBottom && activeConversationId) {
@@ -201,7 +219,9 @@ export default function App() {
         setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
         const highestSeq =
           messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
-        syncEngine.markAsRead(activeConversationId, highestSeq > 0 ? highestSeq : undefined);
+        if (highestSeq > 0) {
+          syncEngine.markAsRead(activeConversationId, highestSeq);
+        }
       }
     }
   };
@@ -210,11 +230,14 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     setShowScrollBottom(false);
     if (activeConversationId) {
+      wasNearBottomMapRef.current[activeConversationId] = true;
       if ((unreadCounts[activeConversationId] ?? 0) > 0) {
         setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
         const highestSeq =
           messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
-        syncEngine.markAsRead(activeConversationId, highestSeq > 0 ? highestSeq : undefined);
+        if (highestSeq > 0) {
+          syncEngine.markAsRead(activeConversationId, highestSeq);
+        }
       }
     }
   };
@@ -518,12 +541,15 @@ export default function App() {
       return;
     }
 
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
     const boundary = readBoundaryMap[activeConversationId];
     const unreadNum = unreadCounts[activeConversationId] ?? 0;
     const hasUnread = (boundary !== null && boundary !== undefined) || unreadNum > 0;
 
+    // CASE 1: Conversation has NEW unread messages! Position and lock directly on unread separator
     if (hasUnread) {
-      // Find the first unread message
       let firstUnreadIdx = messages.findIndex(
         (m) =>
           typeof m.seq === 'number' &&
@@ -545,26 +571,57 @@ export default function App() {
       }
 
       if (firstUnreadIdx >= 0) {
-        // Unread separator exists: position view directly on the separator
-        if (unreadSeparatorRef.current && messagesContainerRef.current) {
-          const container = messagesContainerRef.current;
+        if (unreadSeparatorRef.current) {
           const separator = unreadSeparatorRef.current;
-          container.scrollTop = Math.max(0, separator.offsetTop - container.offsetTop - 12);
+          const targetScroll = Math.max(0, separator.offsetTop - container.offsetTop - 12);
+          container.scrollTop = targetScroll;
           positionedConvIdRef.current = activeConversationId;
           setShowScrollBottom(true);
+
+          requestAnimationFrame(() => {
+            if (unreadSeparatorRef.current && messagesContainerRef.current) {
+              messagesContainerRef.current.scrollTop = Math.max(
+                0,
+                unreadSeparatorRef.current.offsetTop - messagesContainerRef.current.offsetTop - 12
+              );
+            }
+          });
           return;
         }
-        // If separator DOM node not yet mounted, wait for next render cycle - DO NOT SCROLL TO BOTTOM!
+        // If separator not mounted in DOM yet, do not mark as positioned; wait for DOM render
         return;
       }
     }
 
-    // No unread messages from others: position directly at bottom
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    // CASE 2: No new unread messages — Restore exact previous scroll position if user was reading older messages
+    const savedPos = scrollPosMapRef.current[activeConversationId];
+    const wasNearBottom = wasNearBottomMapRef.current[activeConversationId];
+
+    if (typeof savedPos === 'number' && !wasNearBottom) {
+      container.scrollTop = savedPos;
       positionedConvIdRef.current = activeConversationId;
-      setShowScrollBottom(false);
+      setShowScrollBottom(true);
+
+      requestAnimationFrame(() => {
+        if (messagesContainerRef.current) {
+          messagesContainerRef.current.scrollTop = savedPos;
+        }
+      });
+      return;
     }
+
+    // CASE 3: No unread messages & user was at bottom or first visit -> Position at the BOTTOM!
+    // NEVER go to the top for messages already read!
+    messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    container.scrollTop = container.scrollHeight;
+    positionedConvIdRef.current = activeConversationId;
+    setShowScrollBottom(false);
+
+    requestAnimationFrame(() => {
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      }
+    });
   }, [messages, activeConversationId, readBoundaryMap, currentUser?._id, unreadCounts]);
 
   const loadConversations = async () => {
@@ -591,6 +648,11 @@ export default function App() {
           currentActive && list.some((c: ConversationItem) => c._id === currentActive)
             ? currentActive
             : list[0]._id;
+
+        const activeConv = list.find((c: ConversationItem) => c._id === nextId);
+        const hasUnread = (activeConv?.unreadCount ?? 0) > 0;
+        const boundary = hasUnread ? (activeConv?.lastReadSeq ?? 0) : null;
+        setReadBoundaryMap((prev) => ({ ...boundaries, ...prev, [nextId]: boundary }));
 
         positionedConvIdRef.current = null;
         setActiveConversationId(nextId);
@@ -694,6 +756,9 @@ export default function App() {
     await syncEngine.sendMessage(activeConversationId, text);
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     setShowScrollBottom(false);
+    if (activeConversationId) {
+      wasNearBottomMapRef.current[activeConversationId] = true;
+    }
   };
 
   const handleCreateRoom = async (e: React.FormEvent) => {
