@@ -170,9 +170,12 @@ export async function deleteMessage({ conversationId, messageId, userId }) {
 }
 
 export async function markReceipt({ conversationId, userId, deliveredUpToSeq, readUpToSeq }) {
+  const conv = await Conversation.findById(conversationId);
+  const maxValidSeq = conv?.lastSeq || 0;
+
   const updates = {};
-  if (deliveredUpToSeq) updates.lastDeliveredSeq = deliveredUpToSeq;
-  if (readUpToSeq) updates.lastReadSeq = readUpToSeq;
+  if (deliveredUpToSeq) updates.lastDeliveredSeq = Math.min(deliveredUpToSeq, maxValidSeq);
+  if (readUpToSeq) updates.lastReadSeq = Math.min(readUpToSeq, maxValidSeq);
 
   const membership = await Membership.findOneAndUpdate(
     { conversationId, userId },

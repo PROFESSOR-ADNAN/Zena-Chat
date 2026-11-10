@@ -85,8 +85,8 @@ export class SyncEngine {
   }
 
   public markAsRead(conversationId: string, upToSeq?: number) {
-    if (this.socket && this.socket.connected && conversationId) {
-      this.socket.emit('receipt:read', { conversationId, upToSeq: upToSeq || 999999 });
+    if (this.socket && this.socket.connected && conversationId && upToSeq && upToSeq > 0) {
+      this.socket.emit('receipt:read', { conversationId, upToSeq });
     }
   }
 

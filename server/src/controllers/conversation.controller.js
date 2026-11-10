@@ -249,8 +249,14 @@ export const listMyConversations = async (req, res, next) => {
           conversationId: c._id,
           userId: req.user._id,
         });
-        obj.lastReadSeq = membership?.lastReadSeq || 0;
-        obj.unreadCount = Math.max(0, (c.lastSeq || 0) - (membership?.lastReadSeq || 0));
+        const actualLastSeq = c.lastSeq || 0;
+        let userLastRead = membership?.lastReadSeq || 0;
+        if (userLastRead > actualLastSeq) {
+          userLastRead = actualLastSeq;
+          Membership.updateOne({ conversationId: c._id, userId: req.user._id }, { lastReadSeq: actualLastSeq }).catch(() => {});
+        }
+        obj.lastReadSeq = userLastRead;
+        obj.unreadCount = Math.max(0, actualLastSeq - userLastRead);
 
         return obj;
       })
@@ -291,7 +297,12 @@ export const getMessages = async (req, res, next) => {
       conversationId: conversation._id,
       userId: req.user._id,
     });
-    const lastReadSeq = prevMembership?.lastReadSeq || 0;
+    const actualLastSeq = conversation.lastSeq || 0;
+    let lastReadSeq = prevMembership?.lastReadSeq || 0;
+    if (lastReadSeq > actualLastSeq) {
+      lastReadSeq = actualLastSeq;
+      Membership.updateOne({ conversationId: conversation._id, userId: req.user._id }, { lastReadSeq: actualLastSeq }).catch(() => {});
+    }
 
     if (messages.length > 0) {
       const highestSeq = Math.max(...messages.map((m) => m.seq || 0));

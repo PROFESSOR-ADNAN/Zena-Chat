@@ -161,7 +161,6 @@ export default function App() {
   // Telegram-style unread separation and smart scrolling
   const [readBoundaryMap, setReadBoundaryMap] = useState<Record<string, number | null>>({});
   const [showScrollBottom, setShowScrollBottom] = useState(false);
-  const [isNearBottom, setIsNearBottom] = useState(true);
 
   const messagesContainerRef = useRef<HTMLElement>(null);
   const unreadSeparatorRef = useRef<HTMLDivElement>(null);
@@ -172,24 +171,19 @@ export default function App() {
   useEffect(() => {
     activeConvIdRef.current = activeConversationId;
     positionedConvIdRef.current = null;
-    setIsNearBottom(false);
     setShowScrollBottom(false);
   }, [activeConversationId]);
 
   const selectConversation = (convId: string) => {
     if (!convId) return;
     positionedConvIdRef.current = null;
-    setIsNearBottom(false);
     setShowScrollBottom(false);
 
-    // Initialize reading boundary for this conversation session if not yet recorded
+    // Initialize reading boundary for this conversation session
     const conv = conversations.find((c) => String(c._id) === String(convId));
     const hasUnread = (unreadCounts[convId] ?? 0) > 0 || (conv?.unreadCount ?? 0) > 0;
     const boundary = hasUnread ? (conv?.lastReadSeq ?? 0) : null;
-    setReadBoundaryMap((prev) => {
-      if (prev[convId] !== undefined) return prev;
-      return { ...prev, [convId]: boundary };
-    });
+    setReadBoundaryMap((prev) => ({ ...prev, [convId]: boundary }));
 
     setActiveConversationId(convId);
     fetchHistory(convId);
@@ -200,7 +194,6 @@ export default function App() {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
     const nearBottom = distanceFromBottom < 80;
-    setIsNearBottom(nearBottom);
     setShowScrollBottom(!nearBottom);
 
     if (nearBottom && activeConversationId) {
@@ -215,7 +208,6 @@ export default function App() {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    setIsNearBottom(true);
     setShowScrollBottom(false);
     if (activeConversationId) {
       if ((unreadCounts[activeConversationId] ?? 0) > 0) {
@@ -439,6 +431,15 @@ export default function App() {
     try {
       const data = await apiFetch(`/api/v1/conversations/${convId}/messages?limit=100`);
 
+      if (data?.lastReadSeq !== undefined) {
+        setReadBoundaryMap((prev) => {
+          if (prev[convId] !== undefined && prev[convId] !== null) return prev;
+          const conv = conversations.find((c) => String(c._id) === String(convId));
+          const hasUnread = (unreadCounts[convId] ?? 0) > 0 || (conv?.unreadCount ?? 0) > 0;
+          return { ...prev, [convId]: hasUnread ? data.lastReadSeq : null };
+        });
+      }
+
       const hist = Array.isArray(data)
         ? data
         : Array.isArray(data?.messages)
@@ -512,51 +513,59 @@ export default function App() {
   useEffect(() => {
     if (!messages || messages.length === 0 || !activeConversationId) return;
 
-    const boundary = readBoundaryMap[activeConversationId];
-    const hasUnread = boundary !== null && boundary !== undefined;
-
-    // 1. Initial positioning for this conversation session
-    if (positionedConvIdRef.current !== activeConversationId) {
-      if (hasUnread) {
-        const firstUnreadIdx = messages.findIndex(
-          (m) =>
-            typeof m.seq === 'number' &&
-            m.seq > boundary &&
-            m.senderId !== currentUser?._id &&
-            m.senderId !== 'self'
-        );
-
-        if (firstUnreadIdx >= 0) {
-          // Unread separator exists: position view directly on the separator
-          if (unreadSeparatorRef.current && messagesContainerRef.current) {
-            const container = messagesContainerRef.current;
-            const separator = unreadSeparatorRef.current;
-            container.scrollTop = Math.max(0, separator.offsetTop - container.offsetTop - 12);
-            positionedConvIdRef.current = activeConversationId;
-            setIsNearBottom(false);
-            setShowScrollBottom(true);
-            return;
-          }
-          // If separator DOM node not yet mounted, wait for next render cycle
-          return;
-        }
-      }
-
-      // No unread messages from others: position directly at bottom
-      if (messagesContainerRef.current) {
-        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
-        positionedConvIdRef.current = activeConversationId;
-        setIsNearBottom(true);
-        setShowScrollBottom(false);
-      }
+    // Once initial positioning for this active conversation is done, NEVER AUTO-SCROLL ON INCOMING MESSAGES!
+    if (positionedConvIdRef.current === activeConversationId) {
       return;
     }
 
-    // 2. Already positioned: only keep user at the bottom if they were already at the bottom
-    if (isNearBottom && messagesContainerRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const boundary = readBoundaryMap[activeConversationId];
+    const unreadNum = unreadCounts[activeConversationId] ?? 0;
+    const hasUnread = (boundary !== null && boundary !== undefined) || unreadNum > 0;
+
+    if (hasUnread) {
+      // Find the first unread message
+      let firstUnreadIdx = messages.findIndex(
+        (m) =>
+          typeof m.seq === 'number' &&
+          boundary !== null &&
+          boundary !== undefined &&
+          m.seq > boundary &&
+          m.senderId !== currentUser?._id &&
+          m.senderId !== 'self'
+      );
+
+      if (firstUnreadIdx === -1 && unreadNum > 0) {
+        const otherMessages = messages.filter(
+          (m) => m.senderId !== currentUser?._id && m.senderId !== 'self'
+        );
+        if (otherMessages.length > 0) {
+          const targetMsg = otherMessages[Math.max(0, otherMessages.length - unreadNum)];
+          firstUnreadIdx = messages.findIndex((m) => m.id === targetMsg?.id);
+        }
+      }
+
+      if (firstUnreadIdx >= 0) {
+        // Unread separator exists: position view directly on the separator
+        if (unreadSeparatorRef.current && messagesContainerRef.current) {
+          const container = messagesContainerRef.current;
+          const separator = unreadSeparatorRef.current;
+          container.scrollTop = Math.max(0, separator.offsetTop - container.offsetTop - 12);
+          positionedConvIdRef.current = activeConversationId;
+          setShowScrollBottom(true);
+          return;
+        }
+        // If separator DOM node not yet mounted, wait for next render cycle - DO NOT SCROLL TO BOTTOM!
+        return;
+      }
     }
-  }, [messages, activeConversationId, readBoundaryMap, isNearBottom, currentUser?._id]);
+
+    // No unread messages from others: position directly at bottom
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+      positionedConvIdRef.current = activeConversationId;
+      setShowScrollBottom(false);
+    }
+  }, [messages, activeConversationId, readBoundaryMap, currentUser?._id, unreadCounts]);
 
   const loadConversations = async () => {
     try {
@@ -583,6 +592,7 @@ export default function App() {
             ? currentActive
             : list[0]._id;
 
+        positionedConvIdRef.current = null;
         setActiveConversationId(nextId);
         fetchHistory(nextId);
 
@@ -682,6 +692,8 @@ export default function App() {
     const text = inputText.trim();
     setInputText('');
     await syncEngine.sendMessage(activeConversationId, text);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setShowScrollBottom(false);
   };
 
   const handleCreateRoom = async (e: React.FormEvent) => {
@@ -1287,16 +1299,30 @@ export default function App() {
 
             {(() => {
               const boundary = readBoundaryMap[activeConversationId];
-              const hasUnread = boundary !== null && boundary !== undefined;
-              const firstUnreadIndex = hasUnread && messages
+              const unreadNum = unreadCounts[activeConversationId] ?? 0;
+              const hasUnread = (boundary !== null && boundary !== undefined) || unreadNum > 0;
+              let firstUnreadIndex = hasUnread && messages
                 ? messages.findIndex(
                     (m) =>
                       typeof m.seq === 'number' &&
+                      boundary !== null &&
+                      boundary !== undefined &&
                       m.seq > boundary &&
                       m.senderId !== currentUser._id &&
                       m.senderId !== 'self'
                   )
                 : -1;
+
+              if (firstUnreadIndex === -1 && unreadNum > 0 && messages) {
+                const otherMessages = messages.filter(
+                  (m) => m.senderId !== currentUser._id && m.senderId !== 'self'
+                );
+                if (otherMessages.length > 0) {
+                  const targetMsg = otherMessages[Math.max(0, otherMessages.length - unreadNum)];
+                  firstUnreadIndex = messages.findIndex((m) => m.id === targetMsg?.id);
+                }
+              }
+
               const unreadCountInView =
                 firstUnreadIndex >= 0 && messages ? messages.length - firstUnreadIndex : 0;
 
@@ -1422,16 +1448,30 @@ export default function App() {
             <ChevronDown className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
             {(() => {
               const boundary = readBoundaryMap[activeConversationId];
-              const hasUnread = boundary !== null && boundary !== undefined;
-              const firstUnreadIdx = hasUnread && messages
+              const unreadNum = unreadCounts[activeConversationId] ?? 0;
+              const hasUnread = (boundary !== null && boundary !== undefined) || unreadNum > 0;
+              let firstUnreadIdx = hasUnread && messages
                 ? messages.findIndex(
                     (m) =>
                       typeof m.seq === 'number' &&
+                      boundary !== null &&
+                      boundary !== undefined &&
                       m.seq > boundary &&
                       m.senderId !== currentUser._id &&
                       m.senderId !== 'self'
                   )
                 : -1;
+
+              if (firstUnreadIdx === -1 && unreadNum > 0 && messages) {
+                const otherMessages = messages.filter(
+                  (m) => m.senderId !== currentUser._id && m.senderId !== 'self'
+                );
+                if (otherMessages.length > 0) {
+                  const targetMsg = otherMessages[Math.max(0, otherMessages.length - unreadNum)];
+                  firstUnreadIdx = messages.findIndex((m) => m.id === targetMsg?.id);
+                }
+              }
+
               const unreadCountInView =
                 firstUnreadIdx >= 0 && messages ? messages.length - firstUnreadIdx : 0;
               const displayCount = unreadCounts[activeConversationId] || unreadCountInView;
