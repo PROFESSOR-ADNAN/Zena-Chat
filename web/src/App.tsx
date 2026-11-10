@@ -36,6 +36,7 @@ interface ConversationItem {
   _id: string;
   type: 'dm' | 'group';
   name?: string;
+  unreadCount?: number;
   participants: Array<{ _id: string; username?: string; displayName?: string; name?: string }>;
 }
 
@@ -77,8 +78,23 @@ export default function App() {
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState('');
   const [isDeletingConv, setIsDeletingConv] = useState(false);
+  const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const activeConvIdRef = useRef(activeConversationId);
+  useEffect(() => {
+    activeConvIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  // Dynamic page title with total unread count (Telegram-style)
+  useEffect(() => {
+    const totalUnread = Object.values(unreadCounts).reduce((sum, n) => sum + (n || 0), 0);
+    if (totalUnread > 0) {
+      document.title = `(${totalUnread}) Zena Chat`;
+    } else {
+      document.title = 'Zena Chat';
+    }
+  }, [unreadCounts]);
 
   // Reactive IndexedDB messages query with deduplication
   const messages = useLiveQuery<LocalMessage[]>(
@@ -144,6 +160,14 @@ export default function App() {
         }
         return prev;
       });
+
+      // Telegram-style unread notification
+      if (newMsg.conversationId !== activeConvIdRef.current) {
+        setUnreadCounts((prev) => ({
+          ...prev,
+          [newMsg.conversationId]: (prev[newMsg.conversationId] || 0) + 1,
+        }));
+      }
     });
 
     return () => {
@@ -239,6 +263,8 @@ export default function App() {
     if (activeConversationId) {
       syncEngine.joinConversation(activeConversationId);
       fetchHistory(activeConversationId);
+      setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
+      syncEngine.markAsRead(activeConversationId);
     }
   }, [activeConversationId, connectionState]);
 
@@ -253,6 +279,12 @@ export default function App() {
       setConversations(list);
 
       if (list.length > 0) {
+        const counts: Record<string, number> = {};
+        for (const c of list) {
+          counts[c._id] = c.unreadCount || 0;
+        }
+        setUnreadCounts((prev) => ({ ...counts, ...prev, [activeConvIdRef.current || list[0]._id]: 0 }));
+
         setActiveConversationId((prev) => {
           const nextId = prev && list.some((c: ConversationItem) => c._id === prev) ? prev : list[0]._id;
           fetchHistory(nextId);
@@ -724,6 +756,8 @@ export default function App() {
                 onClick={() => {
                   setActiveConversationId(c._id);
                   fetchHistory(c._id);
+                  setUnreadCounts((prev) => ({ ...prev, [c._id]: 0 }));
+                  syncEngine.markAsRead(c._id);
                 }}
                 className={`w-full text-left p-3 text-xs flex items-center justify-between group cursor-pointer transition ${
                   isSelected ? 'bg-zena-50 border-r-2 border-zena-600 font-semibold' : 'hover:bg-gray-100 text-gray-700'
@@ -743,10 +777,24 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Telegram-style Unread Message Badge */}
+                {(unreadCounts[c._id] || 0) > 0 && !isSelected && (
+                  <span className="shrink-0 ml-1.5 px-2 py-0.5 text-[10px] font-bold bg-zena-600 text-white rounded-full min-w-[20px] text-center shadow-xs">
+                    {(unreadCounts[c._id] || 0) > 99 ? '99+' : unreadCounts[c._id]}
+                  </span>
+                )}
+
                 {/* Delete button (for all chats except protected General Chat) */}
                 {c.name !== 'General Chat' && (
                   <button
-                    onClick={(e) => handleDeleteConversation(c._id, e)}
+                    onClick={(e) => {
+                      handleDeleteConversation(c._id, e);
+                      setUnreadCounts((prev) => {
+                        const copy = { ...prev };
+                        delete copy[c._id];
+                        return copy;
+                      });
+                    }}
                     title="Delete Conversation"
                     className="opacity-0 group-hover:opacity-100 p-1.5 text-gray-400 hover:text-red-600 hover:bg-gray-200 rounded transition shrink-0 ml-1"
                   >

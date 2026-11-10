@@ -62,10 +62,10 @@ export const createDM = async (req, res, next) => {
 
 // Consolidate duplicate rooms with the same name (e.g. "General Chat" or custom rooms)
 export const consolidateRoomByName = async (name, type = 'group') => {
-  const escaped = name.trim().replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
+  const escaped = name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const rooms = await Conversation.find({
     type,
-    name: { $regex: `^${escaped}$`, $options: 'i' },
+    name: new RegExp(`^${escaped}$`, 'i'),
   }).sort('createdAt');
 
   if (rooms.length === 0) return null;
@@ -227,6 +227,14 @@ export const listMyConversations = async (req, res, next) => {
             isOnline: await isUserOnline(p._id),
           }))
         );
+
+        // Calculate unread count for Telegram-style badge
+        const membership = await Membership.findOne({
+          conversationId: c._id,
+          userId: req.user._id,
+        });
+        obj.unreadCount = Math.max(0, (c.lastSeq || 0) - (membership?.lastReadSeq || 0));
+
         return obj;
       })
     );
@@ -245,12 +253,8 @@ export const getMessages = async (req, res, next) => {
 
     const limit = Math.min(parseInt(req.query.limit) || 100, 200);
     const filter = {
-      $or: [{ conversationId: conversation._id }, { conversation: conversation._id }],
-      $and: [
-        {
-          $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-        },
-      ],
+      conversationId: conversation._id,
+      deletedAt: null,
     };
 
     let sortDirection = -1;
@@ -264,15 +268,14 @@ export const getMessages = async (req, res, next) => {
     const messages = await Message.find(filter)
       .sort({ _id: sortDirection })
       .limit(limit)
-      .populate('senderId', 'username displayName name')
-      .populate('sender', 'username displayName name');
+      .populate('senderId', 'username displayName name');
 
     if (messages.length > 0) {
-      const newest = sortDirection === 1 ? messages[messages.length - 1] : messages[0];
-      if (newest?.seq) {
+      const highestSeq = Math.max(...messages.map((m) => m.seq || 0));
+      if (highestSeq > 0) {
         await Membership.findOneAndUpdate(
           { conversationId: conversation._id, userId: req.user._id },
-          { $max: { lastDeliveredSeq: newest.seq } }
+          { $max: { lastReadSeq: highestSeq, lastDeliveredSeq: highestSeq } }
         ).catch(() => {});
       }
     }
@@ -307,20 +310,20 @@ export const syncConversations = async (req, res, next) => {
     const results = await Promise.all(
       conversations.map(async (conversation) => {
         const messages = await Message.find({
-          $or: [{ conversationId: conversation._id }, { conversation: conversation._id }],
+          conversationId: conversation._id,
           createdAt: { $gt: since },
+          deletedAt: null,
         })
           .sort({ _id: 1 })
           .limit(SYNC_MESSAGE_CAP)
-          .populate('senderId', 'username displayName name')
-          .populate('sender', 'username displayName name');
+          .populate('senderId', 'username displayName name');
 
         if (messages.length > 0) {
-          const newest = messages[messages.length - 1];
-          if (newest?.seq) {
+          const highestSeq = Math.max(...messages.map((m) => m.seq || 0));
+          if (highestSeq > 0) {
             await Membership.findOneAndUpdate(
               { conversationId: conversation._id, userId: req.user._id },
-              { $max: { lastDeliveredSeq: newest.seq } }
+              { $max: { lastReadSeq: highestSeq, lastDeliveredSeq: highestSeq } }
             ).catch(() => {});
           }
         }

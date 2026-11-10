@@ -84,6 +84,12 @@ export class SyncEngine {
     }
   }
 
+  public markAsRead(conversationId: string, upToSeq?: number) {
+    if (this.socket && this.socket.connected && conversationId) {
+      this.socket.emit('receipt:read', { conversationId, upToSeq: upToSeq || 999999 });
+    }
+  }
+
   private getDeviceId(): string {
     let id = localStorage.getItem('zena_device_id');
     if (!id) {

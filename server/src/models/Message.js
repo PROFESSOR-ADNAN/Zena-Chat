@@ -54,8 +54,19 @@ const messageSchema = new mongoose.Schema(
       default: null,
     },
   },
-  { timestamps: true }
+  { timestamps: true, strictPopulate: false }
 );
+
+// Virtual alias so m.sender works interchangeably with m.senderId
+messageSchema.virtual('sender', {
+  ref: 'User',
+  localField: 'senderId',
+  foreignField: '_id',
+  justOne: true,
+});
+
+messageSchema.set('toObject', { virtuals: true });
+messageSchema.set('toJSON', { virtuals: true });
 
 // Compound unique index for strict idempotency per sender within conversation
 messageSchema.index(
