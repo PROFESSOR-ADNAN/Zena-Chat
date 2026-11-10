@@ -172,6 +172,86 @@ export default function App() {
   const scrollPosMapRef = useRef<Record<string, number>>({});
   const wasNearBottomMapRef = useRef<Record<string, boolean>>({});
 
+  const lastMarkReadSeqRef = useRef<Record<string, number>>({});
+  const markReadTimerRef = useRef<any>(null);
+
+  const throttledMarkAsRead = (convId: string, seq: number) => {
+    if (lastMarkReadSeqRef.current[convId] === seq) return;
+    lastMarkReadSeqRef.current[convId] = seq;
+
+    if (markReadTimerRef.current) {
+      clearTimeout(markReadTimerRef.current);
+    }
+
+    markReadTimerRef.current = setTimeout(() => {
+      syncEngine.markAsRead(convId, seq);
+    }, 100);
+  };
+
+  const updateVisibleReadProgress = () => {
+    const container = messagesContainerRef.current;
+    if (!container || !activeConversationId || !messages || messages.length === 0) return;
+
+    const viewportBottom = container.scrollTop + container.clientHeight;
+    const isNearBottom = container.scrollHeight - viewportBottom < 60;
+
+    const currentConv = conversations.find((c) => String(c._id) === String(activeConversationId));
+    const prevReadSeq = currentConv?.lastReadSeq ?? readBoundaryMap[activeConversationId] ?? 0;
+
+    let maxSeenSeq = prevReadSeq;
+
+    if (isNearBottom) {
+      const highestSeq = Math.max(...messages.map((m) => m.seq || 0));
+      if (highestSeq > maxSeenSeq) {
+        maxSeenSeq = highestSeq;
+      }
+    } else {
+      const messageElements = container.querySelectorAll<HTMLElement>('.message-item[data-seq]');
+      messageElements.forEach((el) => {
+        if (el.offsetTop <= viewportBottom - 8) {
+          const seq = Number(el.dataset.seq);
+          if (!isNaN(seq) && seq > maxSeenSeq) {
+            maxSeenSeq = seq;
+          }
+        }
+      });
+    }
+
+    if (maxSeenSeq > prevReadSeq) {
+      const remainingUnread = isNearBottom
+        ? 0
+        : messages.filter(
+            (m) =>
+              typeof m.seq === 'number' &&
+              m.seq > maxSeenSeq &&
+              m.senderId !== currentUser?._id &&
+              m.senderId !== 'self'
+          ).length;
+
+      // Update real-time unread counts state
+      setUnreadCounts((prev) => ({
+        ...prev,
+        [activeConversationId]: remainingUnread,
+      }));
+
+      // Update conversation in memory so sidebar and lastReadSeq stay accurate
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (String(c._id) === String(activeConversationId)) {
+            return {
+              ...c,
+              lastReadSeq: maxSeenSeq,
+              unreadCount: remainingUnread,
+            };
+          }
+          return c;
+        })
+      );
+
+      throttledMarkAsRead(activeConversationId, maxSeenSeq);
+    }
+  };
+
   useEffect(() => {
     activeConvIdRef.current = activeConversationId;
     positionedConvIdRef.current = null;
@@ -181,11 +261,17 @@ export default function App() {
   const selectConversation = (convId: string) => {
     if (!convId) return;
 
+    // Immediately flush any pending markAsRead for the conversation we are exiting
+    if (activeConversationId && lastMarkReadSeqRef.current[activeConversationId]) {
+      if (markReadTimerRef.current) clearTimeout(markReadTimerRef.current);
+      syncEngine.markAsRead(activeConversationId, lastMarkReadSeqRef.current[activeConversationId]);
+    }
+
     // Save exact position for the conversation we are exiting
     if (activeConversationId && messagesContainerRef.current) {
       const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
       scrollPosMapRef.current[activeConversationId] = scrollTop;
-      wasNearBottomMapRef.current[activeConversationId] = scrollHeight - scrollTop - clientHeight < 80;
+      wasNearBottomMapRef.current[activeConversationId] = scrollHeight - scrollTop - clientHeight < 60;
     }
 
     positionedConvIdRef.current = null;
@@ -193,7 +279,9 @@ export default function App() {
 
     // Initialize reading boundary for this conversation session
     const conv = conversations.find((c) => String(c._id) === String(convId));
-    const hasUnread = (unreadCounts[convId] ?? 0) > 0 || (conv?.unreadCount ?? 0) > 0;
+    const currentUnread =
+      unreadCounts[convId] !== undefined ? unreadCounts[convId] : (conv?.unreadCount ?? 0);
+    const hasUnread = currentUnread > 0;
     const boundary = hasUnread ? (conv?.lastReadSeq ?? 0) : null;
     setReadBoundaryMap((prev) => ({ ...prev, [convId]: boundary }));
 
@@ -205,7 +293,7 @@ export default function App() {
   const handleScroll = (e: React.UIEvent<HTMLElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
-    const nearBottom = distanceFromBottom < 80;
+    const nearBottom = distanceFromBottom < 60;
 
     if (activeConversationId) {
       scrollPosMapRef.current[activeConversationId] = scrollTop;
@@ -214,16 +302,8 @@ export default function App() {
 
     setShowScrollBottom(!nearBottom);
 
-    if (nearBottom && activeConversationId) {
-      if ((unreadCounts[activeConversationId] ?? 0) > 0) {
-        setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
-        const highestSeq =
-          messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
-        if (highestSeq > 0) {
-          syncEngine.markAsRead(activeConversationId, highestSeq);
-        }
-      }
-    }
+    // Real-time Telegram-style unread tracking as user scrolls down
+    updateVisibleReadProgress();
   };
 
   const scrollToBottom = () => {
@@ -231,13 +311,18 @@ export default function App() {
     setShowScrollBottom(false);
     if (activeConversationId) {
       wasNearBottomMapRef.current[activeConversationId] = true;
-      if ((unreadCounts[activeConversationId] ?? 0) > 0) {
-        setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
-        const highestSeq =
-          messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
-        if (highestSeq > 0) {
-          syncEngine.markAsRead(activeConversationId, highestSeq);
-        }
+      setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
+      const highestSeq =
+        messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
+      if (highestSeq > 0) {
+        setConversations((prev) =>
+          prev.map((c) =>
+            String(c._id) === String(activeConversationId)
+              ? { ...c, lastReadSeq: highestSeq, unreadCount: 0 }
+              : c
+          )
+        );
+        syncEngine.markAsRead(activeConversationId, highestSeq);
       }
     }
   };
@@ -409,11 +494,16 @@ export default function App() {
 
       // Telegram-style unread notification
       const isCurrentlyViewing = convId === String(activeConvIdRef.current) && document.visibilityState === 'visible';
-      if (!isFromMe && !isCurrentlyViewing) {
+      const isScrolledUp = isCurrentlyViewing && !wasNearBottomMapRef.current[convId];
+      if (!isFromMe && (!isCurrentlyViewing || isScrolledUp)) {
         setUnreadCounts((prev) => ({
           ...prev,
           [convId]: (prev[convId] || 0) + 1,
         }));
+      } else if (!isFromMe && isCurrentlyViewing && !isScrolledUp) {
+        if (newMsg.seq) {
+          syncEngine.markAsRead(convId, newMsg.seq);
+        }
       }
 
       // Audio notification and visual banner for incoming messages from others
@@ -480,10 +570,12 @@ export default function App() {
 
       if (data?.lastReadSeq !== undefined) {
         setReadBoundaryMap((prev) => {
-          if (prev[convId] !== undefined && prev[convId] !== null) return prev;
           const conv = conversations.find((c) => String(c._id) === String(convId));
-          const hasUnread = (unreadCounts[convId] ?? 0) > 0 || (conv?.unreadCount ?? 0) > 0;
-          return { ...prev, [convId]: hasUnread ? data.lastReadSeq : null };
+          const currentUnread =
+            unreadCounts[convId] !== undefined ? unreadCounts[convId] : (conv?.unreadCount ?? 0);
+          if (currentUnread <= 0) return { ...prev, [convId]: null };
+          const boundary = Math.max(prev[convId] ?? 0, data.lastReadSeq ?? 0);
+          return { ...prev, [convId]: boundary };
         });
       }
 
@@ -609,6 +701,9 @@ export default function App() {
                 unreadSeparatorRef.current.offsetTop - messagesContainerRef.current.offsetTop - 12
               );
             }
+            setTimeout(() => {
+              updateVisibleReadProgress();
+            }, 50);
           });
           return;
         }
@@ -1178,7 +1273,7 @@ export default function App() {
 
           {conversations.map((c) => {
             const isSelected = c._id === activeConversationId;
-            const count = unreadCounts[c._id] || 0;
+            const count = unreadCounts[c._id] !== undefined ? unreadCounts[c._id] : (c.unreadCount || 0);
             const title =
               c.name ||
               (c.participants
@@ -1240,7 +1335,7 @@ export default function App() {
                       {timeFormatted && (
                         <span
                           className={`text-[10px] ml-1 shrink-0 ${
-                            count > 0 && !isSelected ? 'text-zena-600 font-bold' : 'text-gray-400'
+                            count > 0 ? 'text-zena-600 font-bold' : 'text-gray-400'
                           }`}
                         >
                           {timeFormatted}
@@ -1255,8 +1350,12 @@ export default function App() {
                       >
                         {lastSnippet}
                       </p>
-                      {count > 0 && !isSelected && (
-                        <span className="shrink-0 ml-1.5 px-1.5 py-0.5 text-[10px] font-bold bg-zena-600 text-white rounded-full min-w-[20px] text-center shadow-xs">
+                      {count > 0 && (
+                        <span
+                          className={`shrink-0 ml-1.5 px-1.5 py-0.5 text-[10px] font-bold rounded-full min-w-[20px] text-center shadow-xs ${
+                            isSelected ? 'bg-zena-700 text-white' : 'bg-zena-600 text-white'
+                          }`}
+                        >
                           {count > 99 ? '99+' : count}
                         </span>
                       )}
@@ -1462,6 +1561,10 @@ export default function App() {
 
               const unreadCountInView =
                 firstUnreadIndex >= 0 && messages ? messages.length - firstUnreadIndex : 0;
+              const currentRemainingCount =
+                unreadCounts[activeConversationId] !== undefined
+                  ? unreadCounts[activeConversationId]
+                  : unreadCountInView;
 
               return messages?.map((msg, index) => {
                 const isMe = msg.senderId === currentUser._id || msg.senderId === 'self';
@@ -1484,14 +1587,20 @@ export default function App() {
                         <div className="flex-1 border-t border-zena-300 shadow-2xs" />
                         <span className="px-3.5 py-1 bg-zena-100/95 text-zena-800 font-bold rounded-full shadow-xs text-[11px] tracking-wide flex items-center gap-1.5 border border-zena-300 backdrop-blur-xs">
                           <span className="w-2 h-2 rounded-full bg-zena-600 animate-pulse" />
-                          <span>Unread Messages ({unreadCountInView})</span>
+                          <span>
+                            {currentRemainingCount > 0
+                              ? `Unread Messages (${currentRemainingCount})`
+                              : 'All Messages Read ✓'}
+                          </span>
                         </span>
                         <div className="flex-1 border-t border-zena-300 shadow-2xs" />
                       </div>
                     )}
 
                     <div
-                      className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start'}`}
+                      data-seq={msg.seq}
+                      data-sender-id={msg.senderId}
+                      className={`message-item flex flex-col group relative ${isMe ? 'items-end' : 'items-start'}`}
                     >
                       <div
                         className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm relative ${
@@ -1611,7 +1720,10 @@ export default function App() {
 
               const unreadCountInView =
                 firstUnreadIdx >= 0 && messages ? messages.length - firstUnreadIdx : 0;
-              const displayCount = unreadCounts[activeConversationId] || unreadCountInView;
+              const displayCount =
+                unreadCounts[activeConversationId] !== undefined
+                  ? unreadCounts[activeConversationId]
+                  : unreadCountInView;
               return (
                 displayCount > 0 && (
                   <span className="absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-zena-600 text-white text-[10px] font-bold rounded-full min-w-[18px] text-center shadow-xs">
