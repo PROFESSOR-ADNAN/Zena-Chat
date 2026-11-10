@@ -21,6 +21,7 @@ import {
   Trash2,
   X,
   Bell,
+  ChevronDown,
 } from 'lucide-react';
 import { db, LocalMessage } from './db';
 import { syncEngine, ConnectionState } from './sync/engine';
@@ -39,6 +40,7 @@ interface ConversationItem {
   type: 'dm' | 'group';
   name?: string;
   unreadCount?: number;
+  lastReadSeq?: number;
   lastMessageAt?: string;
   lastMessage?: {
     text?: string;
@@ -156,11 +158,37 @@ export default function App() {
   const [unreadCounts, setUnreadCounts] = useState<Record<string, number>>({});
   const [activeToast, setActiveToast] = useState<NotificationToast | null>(null);
 
+  // Telegram-style unread separation and smart scrolling
+  const [readBoundaryMap, setReadBoundaryMap] = useState<Record<string, number>>({});
+  const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [isNearBottom, setIsNearBottom] = useState(true);
+
+  const messagesContainerRef = useRef<HTMLElement>(null);
+  const unreadSeparatorRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConvIdRef = useRef(activeConversationId);
+
   useEffect(() => {
     activeConvIdRef.current = activeConversationId;
+    setHasScrolledToUnread(false);
+    setIsNearBottom(true);
+    setShowScrollBottom(false);
   }, [activeConversationId]);
+
+  const handleScroll = (e: React.UIEvent<HTMLElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    const nearBottom = distanceFromBottom < 80;
+    setIsNearBottom(nearBottom);
+    setShowScrollBottom(!nearBottom);
+  };
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    setIsNearBottom(true);
+    setShowScrollBottom(false);
+  };
 
   // Unlock Web Audio on first user interaction so notification sound can play freely
   useEffect(() => {
@@ -373,6 +401,13 @@ export default function App() {
     if (!convId) return;
     try {
       const data = await apiFetch(`/api/v1/conversations/${convId}/messages?limit=100`);
+      if (data?.lastReadSeq !== undefined) {
+        setReadBoundaryMap((prev) => {
+          if (prev[convId] !== undefined) return prev;
+          return { ...prev, [convId]: data.lastReadSeq };
+        });
+      }
+
       const hist = Array.isArray(data)
         ? data
         : Array.isArray(data?.messages)
@@ -440,9 +475,28 @@ export default function App() {
     }
   }, [activeConversationId, connectionState]);
 
+  // Smart scrolling on message load or new message (Telegram-style)
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (!messages || messages.length === 0) return;
+
+    if (!hasScrolledToUnread) {
+      // Small timeout allows DOM to mount the messages and separator bar
+      const timer = setTimeout(() => {
+        if (unreadSeparatorRef.current) {
+          // Scroll directly to the first unread message / separator bar
+          unreadSeparatorRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else {
+          // No unread messages: scroll directly to the bottom
+          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+        }
+        setHasScrolledToUnread(true);
+      }, 60);
+      return () => clearTimeout(timer);
+    } else if (isNearBottom) {
+      // If user was already at the bottom and a new message arrives, stay at the bottom
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, hasScrolledToUnread, isNearBottom, activeConversationId]);
 
   const loadConversations = async () => {
     try {
@@ -452,9 +506,14 @@ export default function App() {
 
       if (list.length > 0) {
         const serverCounts: Record<string, number> = {};
+        const serverBoundaries: Record<string, number> = {};
         for (const c of list) {
           serverCounts[c._id] = c.unreadCount || 0;
+          if (c.lastReadSeq !== undefined) {
+            serverBoundaries[c._id] = c.lastReadSeq;
+          }
         }
+        setReadBoundaryMap((prev) => ({ ...serverBoundaries, ...prev }));
 
         const currentActive = activeConvIdRef.current;
         const nextId =
@@ -982,6 +1041,7 @@ export default function App() {
                 key={c._id}
                 onClick={() => {
                   setActiveConversationId(c._id);
+                  setHasScrolledToUnread(false);
                   fetchHistory(c._id);
                   setUnreadCounts((prev) => ({ ...prev, [c._id]: 0 }));
                   syncEngine.markAsRead(c._id);
@@ -1066,7 +1126,7 @@ export default function App() {
       </aside>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col bg-white overflow-hidden">
+      <div className="flex-1 flex flex-col bg-white overflow-hidden relative">
         {/* Top Header */}
         <header className="bg-zena-700 text-white px-4 py-3 flex items-center justify-between border-b border-zena-800">
           <div className="flex items-center space-x-3 truncate">
@@ -1166,7 +1226,11 @@ export default function App() {
             </div>
           </main>
         ) : (
-          <main className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50">
+          <main
+            ref={messagesContainerRef}
+            onScroll={handleScroll}
+            className="flex-1 p-4 overflow-y-auto space-y-3 bg-gray-50 relative"
+          >
             {(!messages || messages.length === 0) && (
               <div className="text-center py-20 text-gray-400">
                 <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-30" />
@@ -1174,98 +1238,164 @@ export default function App() {
               </div>
             )}
 
-            {messages?.map((msg) => {
-              const isMe = msg.senderId === currentUser._id || msg.senderId === 'self';
-              const isEditing = editingMessageId === msg.id;
-              const timeFormatted = new Intl.DateTimeFormat('en-US', {
-                timeZone: 'Africa/Addis_Ababa',
-                hour: '2-digit',
-                minute: '2-digit',
-              }).format(new Date(msg.createdAt));
+            {(() => {
+              const boundarySeq =
+                readBoundaryMap[activeConversationId] ?? currentConv?.lastReadSeq ?? 0;
+              const firstUnreadIndex = messages
+                ? messages.findIndex(
+                    (m) =>
+                      typeof m.seq === 'number' &&
+                      m.seq > boundarySeq &&
+                      m.senderId !== currentUser._id &&
+                      m.senderId !== 'self'
+                  )
+                : -1;
+              const unreadCountInView =
+                firstUnreadIndex >= 0 && messages ? messages.length - firstUnreadIndex : 0;
 
-              return (
-                <div
-                  key={msg.id || msg.clientMsgId}
-                  className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start'}`}
-                >
-                  <div
-                    className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm relative ${
-                      isMe
-                        ? 'bg-zena-600 text-white rounded-br-xs'
-                        : 'bg-white text-gray-900 rounded-bl-xs border border-gray-200'
-                    }`}
-                  >
-                    {!isMe && msg.senderName && (
-                      <p className="text-xs font-semibold text-zena-700 mb-1">
-                        {msg.senderName}
-                      </p>
-                    )}
+              return messages?.map((msg, index) => {
+                const isMe = msg.senderId === currentUser._id || msg.senderId === 'self';
+                const isEditing = editingMessageId === msg.id;
+                const isFirstUnread = index === firstUnreadIndex;
+                const timeFormatted = new Intl.DateTimeFormat('en-US', {
+                  timeZone: 'Africa/Addis_Ababa',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                }).format(new Date(msg.createdAt));
 
-                    {isEditing ? (
-                      <form onSubmit={(e) => handleSaveEdit(e, msg.id)} className="space-y-2 mt-1">
-                        <input
-                          type="text"
-                          autoFocus
-                          value={editingText}
-                          onChange={(e) => setEditingText(e.target.value)}
-                          className="w-full px-2.5 py-1 text-sm bg-white text-gray-900 rounded border border-gray-300 focus:outline-none focus:ring-2 focus:ring-zena-400"
-                        />
-                        <div className="flex justify-end space-x-1.5 text-xs">
-                          <button
-                            type="button"
-                            onClick={handleCancelEdit}
-                            className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 hover:bg-gray-300 transition"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="submit"
-                            disabled={!editingText.trim()}
-                            className="px-2 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 transition"
-                          >
-                            Save
-                          </button>
-                        </div>
-                      </form>
-                    ) : (
-                      <p className="break-words leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                return (
+                  <React.Fragment key={msg.id || msg.clientMsgId}>
+                    {/* Telegram-style Unread Messages Separator Bar */}
+                    {isFirstUnread && (
+                      <div
+                        ref={unreadSeparatorRef}
+                        className="my-5 flex items-center justify-center space-x-3 text-xs select-none sticky top-2 z-10"
+                      >
+                        <div className="flex-1 border-t border-zena-300 shadow-2xs" />
+                        <span className="px-3.5 py-1 bg-zena-100/95 text-zena-800 font-bold rounded-full shadow-xs text-[11px] tracking-wide flex items-center gap-1.5 border border-zena-300 backdrop-blur-xs">
+                          <span className="w-2 h-2 rounded-full bg-zena-600 animate-pulse" />
+                          <span>Unread Messages ({unreadCountInView})</span>
+                        </span>
+                        <div className="flex-1 border-t border-zena-300 shadow-2xs" />
+                      </div>
                     )}
 
                     <div
-                      className={`text-[10px] mt-1 flex items-center justify-end space-x-1.5 ${
-                        isMe ? 'text-green-100' : 'text-gray-400'
-                      }`}
+                      className={`flex flex-col group relative ${isMe ? 'items-end' : 'items-start'}`}
                     >
-                      {msg.editedAt && <span className="italic opacity-80">(edited)</span>}
-                      <span>{timeFormatted}</span>
-                      {isMe && renderStatusIcon(msg.status)}
-                    </div>
+                      <div
+                        className={`max-w-[75%] rounded-2xl px-4 py-2.5 text-sm shadow-sm relative ${
+                          isMe
+                            ? 'bg-zena-600 text-white rounded-br-xs'
+                            : 'bg-white text-gray-900 rounded-bl-xs border border-gray-200'
+                        }`}
+                      >
+                        {!isMe && msg.senderName && (
+                          <p className="text-xs font-semibold text-zena-700 mb-1">
+                            {msg.senderName}
+                          </p>
+                        )}
 
-                    {/* Edit / Delete action overlay on hover for my messages */}
-                    {isMe && !isEditing && (
-                      <div className="absolute -top-3.5 right-2 hidden group-hover:flex items-center space-x-1 bg-white border border-gray-200 rounded-md shadow-md px-1.5 py-0.5 z-10 text-gray-600">
-                        <button
-                          onClick={() => handleStartEdit(msg)}
-                          title="Edit Message"
-                          className="p-1 hover:text-zena-600 hover:bg-gray-100 rounded transition"
+                        {isEditing ? (
+                          <form onSubmit={(e) => handleSaveEdit(e, msg.id)} className="space-y-2 mt-1">
+                            <input
+                              type="text"
+                              autoFocus
+                              value={editingText}
+                              onChange={(e) => setEditingText(e.target.value)}
+                              className="w-full px-2.5 py-1 text-sm bg-white text-gray-900 rounded border border-gray-300 focus:outline-none focus:ring-2 focus:ring-zena-400"
+                            />
+                            <div className="flex justify-end space-x-1.5 text-xs">
+                              <button
+                                type="button"
+                                onClick={handleCancelEdit}
+                                className="px-2 py-0.5 rounded bg-gray-200 text-gray-700 hover:bg-gray-300 transition"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="submit"
+                                disabled={!editingText.trim()}
+                                className="px-2 py-0.5 rounded bg-emerald-600 text-white hover:bg-emerald-700 transition"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </form>
+                        ) : (
+                          <p className="break-words leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                        )}
+
+                        <div
+                          className={`text-[10px] mt-1 flex items-center justify-end space-x-1.5 ${
+                            isMe ? 'text-green-100' : 'text-gray-400'
+                          }`}
                         >
-                          <Pencil className="w-3 h-3" />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteMessage(msg.id)}
-                          title="Delete Message"
-                          className="p-1 hover:text-red-600 hover:bg-gray-100 rounded transition"
-                        >
-                          <Trash2 className="w-3 h-3" />
-                        </button>
+                          {msg.editedAt && <span className="italic opacity-80">(edited)</span>}
+                          <span>{timeFormatted}</span>
+                          {isMe && renderStatusIcon(msg.status)}
+                        </div>
+
+                        {/* Edit / Delete action overlay on hover for my messages */}
+                        {isMe && !isEditing && (
+                          <div className="absolute -top-3.5 right-2 hidden group-hover:flex items-center space-x-1 bg-white border border-gray-200 rounded-md shadow-md px-1.5 py-0.5 z-10 text-gray-600">
+                            <button
+                              onClick={() => handleStartEdit(msg)}
+                              title="Edit Message"
+                              className="p-1 hover:text-zena-600 hover:bg-gray-100 rounded transition"
+                            >
+                              <Pencil className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteMessage(msg.id)}
+                              title="Delete Message"
+                              className="p-1 hover:text-red-600 hover:bg-gray-100 rounded transition"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+                    </div>
+                  </React.Fragment>
+                );
+              });
+            })()}
             <div ref={messagesEndRef} />
           </main>
+        )}
+
+        {/* Floating Telegram-Style Scroll to Bottom Button */}
+        {showScrollBottom && (
+          <button
+            onClick={scrollToBottom}
+            className="absolute bottom-20 right-6 z-20 p-2.5 bg-white text-gray-700 hover:text-zena-600 rounded-full shadow-lg border border-gray-200 hover:bg-gray-50 transition-all flex items-center justify-center group active:scale-95"
+            title="Scroll to latest messages"
+          >
+            <ChevronDown className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
+            {(() => {
+              const boundarySeq =
+                readBoundaryMap[activeConversationId] ?? currentConv?.lastReadSeq ?? 0;
+              const firstUnreadIdx = messages
+                ? messages.findIndex(
+                    (m) =>
+                      typeof m.seq === 'number' &&
+                      m.seq > boundarySeq &&
+                      m.senderId !== currentUser._id &&
+                      m.senderId !== 'self'
+                  )
+                : -1;
+              const unreadCountInView =
+                firstUnreadIdx >= 0 && messages ? messages.length - firstUnreadIdx : 0;
+              return (
+                unreadCountInView > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-zena-600 text-white text-[10px] font-bold rounded-full min-w-[18px] text-center shadow-xs">
+                    {unreadCountInView > 99 ? '99+' : unreadCountInView}
+                  </span>
+                )
+              );
+            })()}
+          </button>
         )}
 
         {/* Message Compose Form */}

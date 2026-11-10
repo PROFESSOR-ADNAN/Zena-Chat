@@ -233,6 +233,7 @@ export const listMyConversations = async (req, res, next) => {
           conversationId: c._id,
           userId: req.user._id,
         });
+        obj.lastReadSeq = membership?.lastReadSeq || 0;
         obj.unreadCount = Math.max(0, (c.lastSeq || 0) - (membership?.lastReadSeq || 0));
 
         return obj;
@@ -270,6 +271,12 @@ export const getMessages = async (req, res, next) => {
       .limit(limit)
       .populate('senderId', 'username displayName name');
 
+    const prevMembership = await Membership.findOne({
+      conversationId: conversation._id,
+      userId: req.user._id,
+    });
+    const lastReadSeq = prevMembership?.lastReadSeq || 0;
+
     if (messages.length > 0) {
       const highestSeq = Math.max(...messages.map((m) => m.seq || 0));
       if (highestSeq > 0) {
@@ -284,6 +291,7 @@ export const getMessages = async (req, res, next) => {
 
     res.json({
       messages: chronological,
+      lastReadSeq,
       nextCursor: messages.length === limit ? messages[messages.length - 1]._id : null,
     });
   } catch (err) {
