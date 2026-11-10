@@ -46,15 +46,23 @@ export const createDM = async (req, res, next) => {
       .populate('participants', 'username displayName name lastSeenAt')
       .populate('lastMessage.sender', 'username displayName name');
 
+    const membership = await Membership.findOne({
+      conversationId: conversation._id,
+      userId: req.user._id,
+    });
+    const populatedObj = populated.toObject();
+    populatedObj.lastReadSeq = membership?.lastReadSeq || 0;
+    populatedObj.unreadCount = Math.max(0, (conversation.lastSeq || 0) - (membership?.lastReadSeq || 0));
+
     const io = req.app.get('io');
     if (io) {
       for (const p of conversation.participants) {
         const pId = p?._id ? p._id.toString() : p.toString();
-        io.to(`user:${pId}`).emit('conversation:new', populated);
+        io.to(`user:${pId}`).emit('conversation:new', populatedObj);
       }
     }
 
-    res.status(200).json(populated);
+    res.status(200).json(populatedObj);
   } catch (err) {
     next(err);
   }
@@ -149,13 +157,21 @@ export const createGroup = async (req, res, next) => {
     const populated = await Conversation.findById(conversation._id)
       .populate('participants', 'username displayName name lastSeenAt');
 
+    const membership = await Membership.findOne({
+      conversationId: conversation._id,
+      userId: req.user._id,
+    });
+    const populatedObj = populated.toObject();
+    populatedObj.lastReadSeq = membership?.lastReadSeq || 0;
+    populatedObj.unreadCount = Math.max(0, (conversation.lastSeq || 0) - (membership?.lastReadSeq || 0));
+
     const io = req.app.get('io');
     if (io) {
       // Notify only the user who created/joined so it does NOT clutter other users' sidebars!
-      io.to(`user:${req.user._id}`).emit('conversation:new', populated);
+      io.to(`user:${req.user._id}`).emit('conversation:new', populatedObj);
     }
 
-    res.status(isNew ? 201 : 200).json(populated);
+    res.status(isNew ? 201 : 200).json(populatedObj);
   } catch (err) {
     next(err);
   }
@@ -282,7 +298,7 @@ export const getMessages = async (req, res, next) => {
       if (highestSeq > 0) {
         await Membership.findOneAndUpdate(
           { conversationId: conversation._id, userId: req.user._id },
-          { $max: { lastReadSeq: highestSeq, lastDeliveredSeq: highestSeq } }
+          { $max: { lastDeliveredSeq: highestSeq } }
         ).catch(() => {});
       }
     }
@@ -331,7 +347,7 @@ export const syncConversations = async (req, res, next) => {
           if (highestSeq > 0) {
             await Membership.findOneAndUpdate(
               { conversationId: conversation._id, userId: req.user._id },
-              { $max: { lastReadSeq: highestSeq, lastDeliveredSeq: highestSeq } }
+              { $max: { lastDeliveredSeq: highestSeq } }
             ).catch(() => {});
           }
         }

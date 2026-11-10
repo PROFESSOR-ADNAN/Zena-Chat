@@ -159,8 +159,7 @@ export default function App() {
   const [activeToast, setActiveToast] = useState<NotificationToast | null>(null);
 
   // Telegram-style unread separation and smart scrolling
-  const [readBoundaryMap, setReadBoundaryMap] = useState<Record<string, number>>({});
-  const [hasScrolledToUnread, setHasScrolledToUnread] = useState(false);
+  const [readBoundaryMap, setReadBoundaryMap] = useState<Record<string, number | null>>({});
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [isNearBottom, setIsNearBottom] = useState(true);
 
@@ -168,13 +167,34 @@ export default function App() {
   const unreadSeparatorRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const activeConvIdRef = useRef(activeConversationId);
+  const positionedConvIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     activeConvIdRef.current = activeConversationId;
-    setHasScrolledToUnread(false);
-    setIsNearBottom(true);
+    positionedConvIdRef.current = null;
+    setIsNearBottom(false);
     setShowScrollBottom(false);
   }, [activeConversationId]);
+
+  const selectConversation = (convId: string) => {
+    if (!convId) return;
+    positionedConvIdRef.current = null;
+    setIsNearBottom(false);
+    setShowScrollBottom(false);
+
+    // Initialize reading boundary for this conversation session if not yet recorded
+    const conv = conversations.find((c) => String(c._id) === String(convId));
+    const hasUnread = (unreadCounts[convId] ?? 0) > 0 || (conv?.unreadCount ?? 0) > 0;
+    const boundary = hasUnread ? (conv?.lastReadSeq ?? 0) : null;
+    setReadBoundaryMap((prev) => {
+      if (prev[convId] !== undefined) return prev;
+      return { ...prev, [convId]: boundary };
+    });
+
+    setActiveConversationId(convId);
+    fetchHistory(convId);
+    syncEngine.joinConversation(convId);
+  };
 
   const handleScroll = (e: React.UIEvent<HTMLElement>) => {
     const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
@@ -182,12 +202,29 @@ export default function App() {
     const nearBottom = distanceFromBottom < 80;
     setIsNearBottom(nearBottom);
     setShowScrollBottom(!nearBottom);
+
+    if (nearBottom && activeConversationId) {
+      if ((unreadCounts[activeConversationId] ?? 0) > 0) {
+        setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
+        const highestSeq =
+          messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
+        syncEngine.markAsRead(activeConversationId, highestSeq > 0 ? highestSeq : undefined);
+      }
+    }
   };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     setIsNearBottom(true);
     setShowScrollBottom(false);
+    if (activeConversationId) {
+      if ((unreadCounts[activeConversationId] ?? 0) > 0) {
+        setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
+        const highestSeq =
+          messages && messages.length > 0 ? Math.max(...messages.map((m) => m.seq || 0)) : 0;
+        syncEngine.markAsRead(activeConversationId, highestSeq > 0 ? highestSeq : undefined);
+      }
+    }
   };
 
   // Unlock Web Audio on first user interaction so notification sound can play freely
@@ -401,12 +438,6 @@ export default function App() {
     if (!convId) return;
     try {
       const data = await apiFetch(`/api/v1/conversations/${convId}/messages?limit=100`);
-      if (data?.lastReadSeq !== undefined) {
-        setReadBoundaryMap((prev) => {
-          if (prev[convId] !== undefined) return prev;
-          return { ...prev, [convId]: data.lastReadSeq };
-        });
-      }
 
       const hist = Array.isArray(data)
         ? data
@@ -415,6 +446,9 @@ export default function App() {
         : [];
 
       if (hist.length > 0) {
+        const currentUserId = currentUser?._id;
+        const messagesToPut: LocalMessage[] = [];
+
         for (const m of hist) {
           const sId =
             typeof m.senderId === 'object' && m.senderId?._id
@@ -432,13 +466,10 @@ export default function App() {
             }
           }
 
-          const currentUserId = currentUser?._id;
           const isMe = sId === String(currentUserId);
-          const cId = convId;
-
-          await db.messages.put({
+          messagesToPut.push({
             id: m._id,
-            conversationId: cId,
+            conversationId: convId,
             seq: m.seq,
             eventSeq: m.eventSeq,
             senderId: sId,
@@ -459,6 +490,10 @@ export default function App() {
               : undefined,
           });
         }
+
+        if (messagesToPut.length > 0) {
+          await db.messages.bulkPut(messagesToPut);
+        }
       }
     } catch (e: any) {
       console.warn('Could not load history for conversation:', e.message);
@@ -470,33 +505,58 @@ export default function App() {
     if (activeConversationId) {
       syncEngine.joinConversation(activeConversationId);
       fetchHistory(activeConversationId);
-      setUnreadCounts((prev) => ({ ...prev, [activeConversationId]: 0 }));
-      syncEngine.markAsRead(activeConversationId);
     }
   }, [activeConversationId, connectionState]);
 
   // Smart scrolling on message load or new message (Telegram-style)
   useEffect(() => {
-    if (!messages || messages.length === 0) return;
+    if (!messages || messages.length === 0 || !activeConversationId) return;
 
-    if (!hasScrolledToUnread) {
-      // Small timeout allows DOM to mount the messages and separator bar
-      const timer = setTimeout(() => {
-        if (unreadSeparatorRef.current) {
-          // Scroll directly to the first unread message / separator bar
-          unreadSeparatorRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        } else {
-          // No unread messages: scroll directly to the bottom
-          messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    const boundary = readBoundaryMap[activeConversationId];
+    const hasUnread = boundary !== null && boundary !== undefined;
+
+    // 1. Initial positioning for this conversation session
+    if (positionedConvIdRef.current !== activeConversationId) {
+      if (hasUnread) {
+        const firstUnreadIdx = messages.findIndex(
+          (m) =>
+            typeof m.seq === 'number' &&
+            m.seq > boundary &&
+            m.senderId !== currentUser?._id &&
+            m.senderId !== 'self'
+        );
+
+        if (firstUnreadIdx >= 0) {
+          // Unread separator exists: position view directly on the separator
+          if (unreadSeparatorRef.current && messagesContainerRef.current) {
+            const container = messagesContainerRef.current;
+            const separator = unreadSeparatorRef.current;
+            container.scrollTop = Math.max(0, separator.offsetTop - container.offsetTop - 12);
+            positionedConvIdRef.current = activeConversationId;
+            setIsNearBottom(false);
+            setShowScrollBottom(true);
+            return;
+          }
+          // If separator DOM node not yet mounted, wait for next render cycle
+          return;
         }
-        setHasScrolledToUnread(true);
-      }, 60);
-      return () => clearTimeout(timer);
-    } else if (isNearBottom) {
-      // If user was already at the bottom and a new message arrives, stay at the bottom
+      }
+
+      // No unread messages from others: position directly at bottom
+      if (messagesContainerRef.current) {
+        messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+        positionedConvIdRef.current = activeConversationId;
+        setIsNearBottom(true);
+        setShowScrollBottom(false);
+      }
+      return;
+    }
+
+    // 2. Already positioned: only keep user at the bottom if they were already at the bottom
+    if (isNearBottom && messagesContainerRef.current) {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, hasScrolledToUnread, isNearBottom, activeConversationId]);
+  }, [messages, activeConversationId, readBoundaryMap, isNearBottom, currentUser?._id]);
 
   const loadConversations = async () => {
     try {
@@ -506,14 +566,16 @@ export default function App() {
 
       if (list.length > 0) {
         const serverCounts: Record<string, number> = {};
-        const serverBoundaries: Record<string, number> = {};
+        const boundaries: Record<string, number | null> = {};
         for (const c of list) {
           serverCounts[c._id] = c.unreadCount || 0;
-          if (c.lastReadSeq !== undefined) {
-            serverBoundaries[c._id] = c.lastReadSeq;
+          if ((c.unreadCount || 0) > 0) {
+            boundaries[c._id] = c.lastReadSeq ?? 0;
+          } else {
+            boundaries[c._id] = null;
           }
         }
-        setReadBoundaryMap((prev) => ({ ...serverBoundaries, ...prev }));
+        setReadBoundaryMap((prev) => ({ ...boundaries, ...prev }));
 
         const currentActive = activeConvIdRef.current;
         const nextId =
@@ -524,11 +586,7 @@ export default function App() {
         setActiveConversationId(nextId);
         fetchHistory(nextId);
 
-        setUnreadCounts((prev) => {
-          const merged = { ...serverCounts, ...prev };
-          if (nextId) merged[nextId] = 0;
-          return merged;
-        });
+        setUnreadCounts((prev) => ({ ...serverCounts, ...prev }));
       }
     } catch (err: any) {
       console.warn('Could not load conversations:', err.message);
@@ -646,9 +704,7 @@ export default function App() {
           const exists = prev.some((c) => c._id === newRoom._id);
           return exists ? prev : [newRoom, ...prev];
         });
-        setActiveConversationId(newRoom._id);
-        fetchHistory(newRoom._id);
-        syncEngine.joinConversation(newRoom._id);
+        selectConversation(newRoom._id);
         setNewRoomName('');
         setShowNewRoomModal(false);
       }
@@ -676,9 +732,7 @@ export default function App() {
           const exists = prev.some((c) => c._id === newDm._id);
           return exists ? prev : [newDm, ...prev];
         });
-        setActiveConversationId(newDm._id);
-        fetchHistory(newDm._id);
-        syncEngine.joinConversation(newDm._id);
+        selectConversation(newDm._id);
         setTargetUsername('');
         setShowNewDmModal(false);
       }
@@ -914,10 +968,7 @@ export default function App() {
       {activeToast && (
         <div
           onClick={() => {
-            setActiveConversationId(activeToast.conversationId);
-            fetchHistory(activeToast.conversationId);
-            setUnreadCounts((prev) => ({ ...prev, [activeToast.conversationId]: 0 }));
-            syncEngine.markAsRead(activeToast.conversationId);
+            selectConversation(activeToast.conversationId);
             setActiveToast(null);
           }}
           className="fixed top-4 right-4 z-50 bg-white border border-zena-200 shadow-2xl rounded-xl p-3 flex items-start space-x-3 max-w-xs sm:max-w-sm cursor-pointer hover:bg-zena-50/60 transition-all duration-200 border-l-4 border-l-zena-600"
@@ -1040,11 +1091,7 @@ export default function App() {
               <div
                 key={c._id}
                 onClick={() => {
-                  setActiveConversationId(c._id);
-                  setHasScrolledToUnread(false);
-                  fetchHistory(c._id);
-                  setUnreadCounts((prev) => ({ ...prev, [c._id]: 0 }));
-                  syncEngine.markAsRead(c._id);
+                  selectConversation(c._id);
                 }}
                 className={`w-full text-left p-3 text-xs flex items-center justify-between group cursor-pointer transition ${
                   isSelected ? 'bg-zena-50 border-r-2 border-zena-600' : 'hover:bg-gray-100 text-gray-700'
@@ -1239,13 +1286,13 @@ export default function App() {
             )}
 
             {(() => {
-              const boundarySeq =
-                readBoundaryMap[activeConversationId] ?? currentConv?.lastReadSeq ?? 0;
-              const firstUnreadIndex = messages
+              const boundary = readBoundaryMap[activeConversationId];
+              const hasUnread = boundary !== null && boundary !== undefined;
+              const firstUnreadIndex = hasUnread && messages
                 ? messages.findIndex(
                     (m) =>
                       typeof m.seq === 'number' &&
-                      m.seq > boundarySeq &&
+                      m.seq > boundary &&
                       m.senderId !== currentUser._id &&
                       m.senderId !== 'self'
                   )
@@ -1374,23 +1421,24 @@ export default function App() {
           >
             <ChevronDown className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
             {(() => {
-              const boundarySeq =
-                readBoundaryMap[activeConversationId] ?? currentConv?.lastReadSeq ?? 0;
-              const firstUnreadIdx = messages
+              const boundary = readBoundaryMap[activeConversationId];
+              const hasUnread = boundary !== null && boundary !== undefined;
+              const firstUnreadIdx = hasUnread && messages
                 ? messages.findIndex(
                     (m) =>
                       typeof m.seq === 'number' &&
-                      m.seq > boundarySeq &&
+                      m.seq > boundary &&
                       m.senderId !== currentUser._id &&
                       m.senderId !== 'self'
                   )
                 : -1;
               const unreadCountInView =
                 firstUnreadIdx >= 0 && messages ? messages.length - firstUnreadIdx : 0;
+              const displayCount = unreadCounts[activeConversationId] || unreadCountInView;
               return (
-                unreadCountInView > 0 && (
+                displayCount > 0 && (
                   <span className="absolute -top-1.5 -right-1.5 px-1.5 py-0.2 bg-zena-600 text-white text-[10px] font-bold rounded-full min-w-[18px] text-center shadow-xs">
-                    {unreadCountInView > 99 ? '99+' : unreadCountInView}
+                    {displayCount > 99 ? '99+' : displayCount}
                   </span>
                 )
               );
