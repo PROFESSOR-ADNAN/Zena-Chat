@@ -23,6 +23,7 @@ import {
   Bell,
   ChevronDown,
 } from 'lucide-react';
+import LandingPage from './LandingPage';
 import { db, LocalMessage } from './db';
 import { syncEngine, ConnectionState } from './sync/engine';
 import { apiFetch } from './api';
@@ -137,6 +138,8 @@ export default function App() {
   });
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showLandingForUser, setShowLandingForUser] = useState(false);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('offline');
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
@@ -811,6 +814,8 @@ export default function App() {
         localStorage.setItem('zena_token', res.token);
         localStorage.setItem('zena_user', JSON.stringify(res));
         setCurrentUser(res);
+        setShowAuthModal(false);
+        setShowLandingForUser(false);
       }
     } catch (err: any) {
       setAuthError(err.message || 'Authentication failed');
@@ -847,6 +852,8 @@ export default function App() {
         localStorage.setItem('zena_token', res.token);
         localStorage.setItem('zena_user', JSON.stringify(res));
         setCurrentUser(res);
+        setShowAuthModal(false);
+        setShowLandingForUser(false);
       }
     } catch (err: any) {
       setAuthError(err.message || 'Demo login failed');
@@ -859,6 +866,8 @@ export default function App() {
     localStorage.removeItem('zena_token');
     localStorage.removeItem('zena_user');
     setCurrentUser(null);
+    setShowLandingForUser(false);
+    setShowAuthModal(false);
     syncEngine.disconnect();
   };
 
@@ -1031,127 +1040,191 @@ export default function App() {
     }
   };
 
-  // If user is not logged in, render the Auth Form
-  if (!currentUser) {
+  // ESC key to close Auth Modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showAuthModal) {
+        setShowAuthModal(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showAuthModal]);
+
+  // If user is not logged in or chose to view landing page, render Landing Page & Auth Modal
+  if (!currentUser || showLandingForUser) {
     return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
-        <div className="bg-white max-w-md w-full rounded-2xl shadow-xl overflow-hidden border border-gray-100">
-          <div className="bg-zena-700 text-white p-6 text-center">
-            <MessageSquare className="w-12 h-12 mx-auto mb-2 text-zena-100" />
-            <h1 className="text-2xl font-bold tracking-tight">{t('appName')}</h1>
-            <p className="text-zena-100 text-sm mt-1">Production Real-Time Chat</p>
-          </div>
+      <div className="relative">
+        <LandingPage
+          onOpenAuth={(mode) => {
+            if (currentUser) {
+              setShowLandingForUser(false);
+            } else {
+              setAuthMode(mode);
+              setShowAuthModal(true);
+            }
+          }}
+          onDemoLogin={() => {
+            if (currentUser) {
+              setShowLandingForUser(false);
+            } else {
+              handleDemoLogin();
+            }
+          }}
+          authLoading={authLoading}
+          onToggleLanguage={toggleLanguage}
+          currentLang={i18n.language}
+        />
 
-          <div className="p-6">
-            <div className="flex border-b border-gray-200 mb-6">
-              <button
-                onClick={() => setAuthMode('login')}
-                className={`flex-1 py-2 font-semibold text-sm transition ${
-                  authMode === 'login'
-                    ? 'border-b-2 border-zena-600 text-zena-700'
-                    : 'text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                Sign In
-              </button>
-              <button
-                onClick={() => setAuthMode('register')}
-                className={`flex-1 py-2 font-semibold text-sm transition ${
-                  authMode === 'register'
-                    ? 'border-b-2 border-zena-600 text-zena-700'
-                    : 'text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                Register
-              </button>
-            </div>
-
-            {authError && (
-              <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-xs font-medium border border-red-200">
-                {authError}
-              </div>
-            )}
-
-            <form onSubmit={handleAuthSubmit} className="space-y-4">
-              {authMode === 'register' && (
-                <>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Username</label>
-                    <input
-                      type="text"
-                      required
-                      value={authForm.username}
-                      onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
-                      placeholder="e.g. adnan_dev"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">Display Name</label>
-                    <input
-                      type="text"
-                      required
-                      value={authForm.displayName}
-                      onChange={(e) => setAuthForm({ ...authForm, displayName: e.target.value })}
-                      placeholder="e.g. Adnan"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
-                    />
-                  </div>
-                </>
-              )}
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  {authMode === 'login' ? 'Email or Username' : 'Email Address'}
-                </label>
-                <input
-                  type={authMode === 'login' ? 'text' : 'email'}
-                  required
-                  value={authForm.email}
-                  onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
-                  placeholder={authMode === 'login' ? 'username or email' : 'you@example.com'}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-700 mb-1">Password</label>
-                <input
-                  type="password"
-                  required
-                  value={authForm.password}
-                  onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
-                  placeholder="••••••••"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full py-2.5 bg-zena-600 text-white rounded-lg font-semibold text-sm hover:bg-zena-700 transition disabled:opacity-50"
-              >
-                {authLoading ? 'Authenticating...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
-              </button>
-            </form>
-
-            <div className="relative my-6 text-center">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-gray-200"></div>
-              </div>
-              <span className="relative bg-white px-3 text-xs text-gray-400 font-medium">OR</span>
-            </div>
-
+        {/* Floating "Back to Chat" Button for logged-in users viewing landing page */}
+        {currentUser && (
+          <div className="fixed bottom-6 right-6 z-50">
             <button
-              onClick={handleDemoLogin}
-              disabled={authLoading}
-              className="w-full py-2 bg-gray-100 text-gray-700 rounded-lg font-medium text-xs hover:bg-gray-200 transition border border-gray-300 flex items-center justify-center space-x-2"
+              onClick={() => setShowLandingForUser(false)}
+              className="px-5 py-3 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm shadow-2xl flex items-center space-x-2 border border-emerald-400/40 hover:scale-105 transition"
             >
-              <User className="w-4 h-4 text-gray-500" />
-              <span>Instant Guest / Demo Login (1-Click)</span>
+              <MessageSquare className="w-4 h-4" />
+              <span>Back to Chat</span>
             </button>
           </div>
-        </div>
+        )}
+
+        {/* Auth Modal Overlay for unauthenticated users */}
+        {!currentUser && showAuthModal && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setShowAuthModal(false);
+            }}
+          >
+            <div className="bg-white max-w-md w-full rounded-2xl shadow-2xl overflow-hidden border border-slate-700/50 relative">
+              {/* Close Button */}
+              <button
+                onClick={() => setShowAuthModal(false)}
+                className="absolute top-4 right-4 z-10 p-1.5 rounded-full bg-slate-900/60 hover:bg-slate-900 text-slate-300 hover:text-white transition"
+                title="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="bg-zena-700 text-white p-6 text-center">
+                <MessageSquare className="w-10 h-10 mx-auto mb-2 text-zena-100" />
+                <h2 className="text-2xl font-bold tracking-tight">{t('appName')}</h2>
+                <p className="text-zena-100 text-xs mt-1">Resilient Real-Time Chat</p>
+              </div>
+
+              <div className="p-6">
+                <div className="flex border-b border-gray-200 mb-6">
+                  <button
+                    onClick={() => setAuthMode('login')}
+                    className={`flex-1 py-2 font-semibold text-sm transition ${
+                      authMode === 'login'
+                        ? 'border-b-2 border-zena-600 text-zena-700'
+                        : 'text-gray-400 hover:text-gray-600'
+                    }`}
+                  >
+                    {t('signIn')}
+                  </button>
+                  <button
+                    onClick={() => setAuthMode('register')}
+                    className={`flex-1 py-2 font-semibold text-sm transition ${
+                      authMode === 'register'
+                        ? 'border-b-2 border-zena-600 text-zena-700'
+                        : 'text-gray-400 hover:text-gray-600'
+                    }`}
+                  >
+                    {t('register')}
+                  </button>
+                </div>
+
+                {authError && (
+                  <div className="mb-4 p-3 bg-red-50 text-red-700 rounded-lg text-xs font-medium border border-red-200">
+                    {authError}
+                  </div>
+                )}
+
+                <form onSubmit={handleAuthSubmit} className="space-y-4">
+                  {authMode === 'register' && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Username</label>
+                        <input
+                          type="text"
+                          required
+                          value={authForm.username}
+                          onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
+                          placeholder="e.g. adnan_dev"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-700 mb-1">Display Name</label>
+                        <input
+                          type="text"
+                          required
+                          value={authForm.displayName}
+                          onChange={(e) => setAuthForm({ ...authForm, displayName: e.target.value })}
+                          placeholder="e.g. Adnan"
+                          className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">
+                      {authMode === 'login' ? 'Email or Username' : 'Email Address'}
+                    </label>
+                    <input
+                      type={authMode === 'login' ? 'text' : 'email'}
+                      required
+                      value={authForm.email}
+                      onChange={(e) => setAuthForm({ ...authForm, email: e.target.value })}
+                      placeholder={authMode === 'login' ? 'username or email' : 'you@example.com'}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-700 mb-1">Password</label>
+                    <input
+                      type="password"
+                      required
+                      value={authForm.password}
+                      onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                      placeholder="••••••••"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-zena-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="w-full py-2.5 bg-zena-600 text-white rounded-lg font-semibold text-sm hover:bg-zena-700 transition disabled:opacity-50"
+                  >
+                    {authLoading ? 'Authenticating...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
+                  </button>
+                </form>
+
+                <div className="relative my-6 text-center">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-200"></div>
+                  </div>
+                  <span className="relative bg-white px-3 text-xs text-gray-400 font-medium">OR</span>
+                </div>
+
+                <button
+                  onClick={handleDemoLogin}
+                  disabled={authLoading}
+                  className="w-full py-2 bg-gray-100 text-gray-700 rounded-lg font-medium text-xs hover:bg-gray-200 transition border border-gray-300 flex items-center justify-center space-x-2"
+                >
+                  <User className="w-4 h-4 text-gray-500" />
+                  <span>Instant Guest / Demo Login (1-Click)</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1464,6 +1537,15 @@ export default function App() {
               )}
               <span>{t(connectionState)}</span>
             </div>
+
+            {/* View Landing / About Button */}
+            <button
+              onClick={() => setShowLandingForUser(true)}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded bg-zena-800 hover:bg-zena-900 text-xs font-semibold text-zena-200 hover:text-white transition"
+              title="About Zena Chat"
+            >
+              <span>About</span>
+            </button>
 
             {/* Language Switcher */}
             <button
