@@ -14,6 +14,9 @@ export class SyncEngine {
   private conversationUpdateListeners: Set<(conv: any) => void> = new Set();
   private conversationDeleteListeners: Set<(data: { conversationId: string }) => void> = new Set();
   private presenceListeners: Set<(data: { userId: string; isOnline: boolean }) => void> = new Set();
+  private typingListeners: Set<(data: { conversationId: string; userId: string; username: string; displayName?: string; isTyping: boolean }) => void> = new Set();
+  private reactionListeners: Set<(data: { conversationId: string; messageId: string; reactions: any[] }) => void> = new Set();
+  private pinListeners: Set<(data: { conversationId: string; pinnedMessage: any }) => void> = new Set();
   private messageListeners: Set<(msg: any) => void> = new Set();
   private messageEditListeners: Set<(msg: any) => void> = new Set();
   private messageDeleteListeners: Set<(data: { _id: string; conversationId: string }) => void> = new Set();
@@ -142,6 +145,45 @@ export class SyncEngine {
     return () => this.messageDeleteListeners.delete(listener);
   }
 
+  public onTyping(listener: (data: { conversationId: string; userId: string; username: string; displayName?: string; isTyping: boolean }) => void) {
+    this.typingListeners.add(listener);
+    return () => this.typingListeners.delete(listener);
+  }
+
+  public onMessageReaction(listener: (data: { conversationId: string; messageId: string; reactions: any[] }) => void) {
+    this.reactionListeners.add(listener);
+    return () => this.reactionListeners.delete(listener);
+  }
+
+  public onConversationPinned(listener: (data: { conversationId: string; pinnedMessage: any }) => void) {
+    this.pinListeners.add(listener);
+    return () => this.pinListeners.delete(listener);
+  }
+
+  public startTyping(conversationId: string) {
+    if (this.socket && this.socket.connected && conversationId) {
+      this.socket.emit('typing:start', { conversationId });
+    }
+  }
+
+  public stopTyping(conversationId: string) {
+    if (this.socket && this.socket.connected && conversationId) {
+      this.socket.emit('typing:stop', { conversationId });
+    }
+  }
+
+  public reactToMessage(conversationId: string, messageId: string, emoji: string) {
+    if (this.socket && this.socket.connected && conversationId && messageId && emoji) {
+      this.socket.emit('message:reaction', { conversationId, messageId, emoji });
+    }
+  }
+
+  public pinMessage(conversationId: string, messageId: string | null) {
+    if (this.socket && this.socket.connected && conversationId) {
+      this.socket.emit('conversation:pin', { conversationId, messageId });
+    }
+  }
+
   private updateState(state: ConnectionState) {
     this.currentState = state;
     this.stateListeners.forEach((l) => l(state));
@@ -218,6 +260,21 @@ export class SyncEngine {
     this.socket.on('presence:update', (data: { userId: string; isOnline: boolean }) => {
       this.presenceListeners.forEach((l) => l(data));
     });
+
+    this.socket.on('typing:update', (data: any) => {
+      this.typingListeners.forEach((l) => l(data));
+    });
+
+    this.socket.on('message:reaction', async (data: any) => {
+      if (data?.messageId) {
+        await db.messages.update(data.messageId, { reactions: data.reactions });
+      }
+      this.reactionListeners.forEach((l) => l(data));
+    });
+
+    this.socket.on('conversation:pinned', (data: any) => {
+      this.pinListeners.forEach((l) => l(data));
+    });
   }
 
   public async runSync() {
@@ -288,8 +345,15 @@ export class SyncEngine {
         (typeof msg.senderId === 'object' ? msg.senderId.displayName || msg.senderId.username : undefined),
       clientMsgId: msg.clientMsgId || msg._id,
       text: msg.text || '',
+      type: msg.type || 'text',
+      mediaUrl: msg.mediaUrl,
+      fileName: msg.fileName,
+      fileSize: msg.fileSize,
+      replyTo: msg.replyTo,
+      reactions: msg.reactions || [],
       status: isMe ? 'sent' : 'delivered',
       createdAt: msg.createdAt,
+      editedAt: msg.editedAt,
     });
 
     // Update sync cursor
@@ -320,7 +384,17 @@ export class SyncEngine {
     }
   }
 
-  public async sendMessage(conversationId: string, text: string): Promise<string> {
+  public async sendMessage(
+    conversationId: string,
+    text: string,
+    options?: {
+      type?: 'text' | 'image' | 'audio' | 'file';
+      mediaUrl?: string;
+      fileName?: string;
+      fileSize?: number;
+      replyTo?: { _id: string; text: string; senderName: string };
+    }
+  ): Promise<string> {
     const clientMsgId = crypto.randomUUID();
     const now = new Date().toISOString();
 
@@ -330,6 +404,12 @@ export class SyncEngine {
       senderId: 'self',
       clientMsgId,
       text,
+      type: options?.type || 'text',
+      mediaUrl: options?.mediaUrl,
+      fileName: options?.fileName,
+      fileSize: options?.fileSize,
+      replyTo: options?.replyTo,
+      reactions: [],
       status: 'sending',
       createdAt: now,
     };
@@ -338,6 +418,11 @@ export class SyncEngine {
       clientMsgId,
       conversationId,
       text,
+      type: options?.type || 'text',
+      mediaUrl: options?.mediaUrl,
+      fileName: options?.fileName,
+      fileSize: options?.fileSize,
+      replyTo: options?.replyTo,
       createdAt: now,
       attempts: 0,
     };
@@ -453,6 +538,11 @@ export class SyncEngine {
           conversationId: item.conversationId,
           clientMsgId: item.clientMsgId,
           text: item.text,
+          type: item.type || 'text',
+          mediaUrl: item.mediaUrl,
+          fileName: item.fileName,
+          fileSize: item.fileSize,
+          replyTo: item.replyTo,
         },
         async (ack: any) => {
           clearTimeout(timer);
@@ -466,6 +556,12 @@ export class SyncEngine {
               senderId: this.getCurrentUserId() || 'self',
               clientMsgId: item.clientMsgId,
               text: item.text,
+              type: item.type || 'text',
+              mediaUrl: item.mediaUrl,
+              fileName: item.fileName,
+              fileSize: item.fileSize,
+              replyTo: item.replyTo,
+              reactions: [],
               status: 'sent',
               createdAt: item.createdAt,
             });

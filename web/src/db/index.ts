@@ -20,6 +20,13 @@ export interface LocalMessage {
   senderName?: string;
   clientMsgId: string;
   text: string;
+  type?: 'text' | 'image' | 'audio' | 'file';
+  mediaUrl?: string;
+  fileName?: string;
+  fileSize?: number;
+  replyToId?: string;
+  replyTo?: { _id: string; text: string; senderName: string };
+  reactions?: Array<{ emoji: string; userId: string; username: string; displayName?: string }>;
   status: 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
   createdAt: string;
   editedAt?: string;
@@ -30,6 +37,12 @@ export interface OutboxItem {
   clientMsgId: string;
   conversationId: string;
   text: string;
+  type?: 'text' | 'image' | 'audio' | 'file';
+  mediaUrl?: string;
+  fileName?: string;
+  fileSize?: number;
+  replyToId?: string;
+  replyTo?: { _id: string; text: string; senderName: string };
   createdAt: string;
   attempts: number;
   lastAttemptAt?: string;

@@ -28,12 +28,24 @@ const messageSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['text', 'image'],
+      enum: ['text', 'image', 'audio', 'file'],
       default: 'text',
     },
     text: {
       type: String,
       default: '',
+    },
+    mediaUrl: {
+      type: String,
+      default: null,
+    },
+    fileName: {
+      type: String,
+      default: null,
+    },
+    fileSize: {
+      type: Number,
+      default: 0,
     },
     attachmentId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -45,6 +57,19 @@ const messageSchema = new mongoose.Schema(
       ref: 'Message',
       default: null,
     },
+    replyTo: {
+      _id: { type: mongoose.Schema.Types.ObjectId },
+      text: { type: String, default: '' },
+      senderName: { type: String, default: '' },
+    },
+    reactions: [
+      {
+        emoji: { type: String, required: true },
+        userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        username: { type: String, default: '' },
+        displayName: { type: String, default: '' },
+      },
+    ],
     editedAt: {
       type: Date,
       default: null,

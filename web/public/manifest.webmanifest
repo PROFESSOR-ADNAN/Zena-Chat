@@ -1,0 +1,17 @@
+{
+  "name": "Zena Chat — Resilient Real-Time Chat",
+  "short_name": "Zena",
+  "description": "Enterprise-grade real-time chat with offline-first sync and resilient architecture.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b141a",
+  "theme_color": "#16a34a",
+  "icons": [
+    {
+      "src": "/vite.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

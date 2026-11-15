@@ -9,7 +9,11 @@ export async function sendMessageIdempotent({
   text,
   attachmentId = null,
   replyToId = null,
+  replyTo = null,
   type = 'text',
+  mediaUrl = null,
+  fileName = null,
+  fileSize = 0,
 }) {
   // 1. Check if message already exists with this clientMsgId
   const existing = await Message.findOne({
@@ -26,6 +30,16 @@ export async function sendMessageIdempotent({
   }
 
   // 2. Atomically increment sequence counters on conversation
+  const snippet =
+    text ||
+    (type === 'image'
+      ? '📷 [Image]'
+      : type === 'audio'
+      ? '🎤 [Voice message]'
+      : type === 'file'
+      ? `📁 [${fileName || 'File'}]`
+      : '[Attachment]');
+
   const conv = await Conversation.findByIdAndUpdate(
     conversationId,
     {
@@ -33,7 +47,7 @@ export async function sendMessageIdempotent({
       $set: {
         lastMessageAt: new Date(),
         lastMessage: {
-          text: text ? text.substring(0, 100) : '[Attachment]',
+          text: snippet.substring(0, 100),
           sender: senderId,
           sentAt: new Date(),
         },
@@ -63,6 +77,10 @@ export async function sendMessageIdempotent({
       text: text || '',
       attachmentId,
       replyToId,
+      replyTo,
+      mediaUrl,
+      fileName,
+      fileSize,
     });
 
     // Advance sender's own read and delivery cursors

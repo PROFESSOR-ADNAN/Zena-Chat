@@ -40,6 +40,22 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    bio: {
+      type: String,
+      default: '',
+      maxlength: 200,
+    },
+    statusText: {
+      type: String,
+      default: 'Hey there! I am using Zena Chat',
+      maxlength: 60,
+    },
+    blockedUsers: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+      },
+    ],
     isSuspended: {
       type: Boolean,
       default: false,

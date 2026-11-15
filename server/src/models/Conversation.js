@@ -49,6 +49,20 @@ const conversationSchema = new mongoose.Schema(
       sentAt: Date,
       seq: Number,
     },
+    description: {
+      type: String,
+      default: '',
+      maxlength: 500,
+    },
+    avatarUrl: {
+      type: String,
+      default: null,
+    },
+    pinnedMessage: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Message',
+      default: null,
+    },
   },
   { timestamps: true }
 );

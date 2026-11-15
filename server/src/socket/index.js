@@ -172,16 +172,42 @@ export const initSocket = (httpServer) => {
     // Idempotent message send
     socket.on('message:send', async (payload = {}, callback) => {
       try {
-        const parsed = MessageSendEventSchema.safeParse(payload);
-        if (!parsed.success) {
-          throw httpError(parsed.error.errors[0]?.message || 'Invalid payload', 400);
-        }
+        const {
+          conversationId,
+          clientMsgId,
+          text,
+          attachmentId,
+          replyToId,
+          replyTo,
+          type = 'text',
+          mediaUrl = null,
+          fileName = null,
+          fileSize = 0,
+        } = payload;
 
-        const { conversationId, clientMsgId, text, attachmentId, replyToId } = parsed.data;
+        if (!conversationId || !clientMsgId) {
+          throw httpError('conversationId and clientMsgId are required', 400);
+        }
+        if (!text && !attachmentId && !mediaUrl) {
+          throw httpError('Message must have text or attachment', 400);
+        }
 
         const conversation = await Conversation.findById(conversationId);
         if (!conversation) throw httpError('Conversation not found', 404);
         assertParticipant(conversation, socket.user._id);
+
+        // Check if recipient has blocked sender in DMs
+        if (conversation.type === 'dm') {
+          const otherUserId = conversation.participants.find(
+            (p) => p.toString() !== socket.user._id.toString()
+          );
+          if (otherUserId) {
+            const recipient = await User.findById(otherUserId);
+            if (recipient?.blockedUsers?.some((b) => b.toString() === socket.user._id.toString())) {
+              throw httpError('You cannot message this user because you have been blocked.', 403);
+            }
+          }
+        }
 
         const { message, isDuplicate } = await sendMessageIdempotent({
           conversationId,
@@ -190,6 +216,11 @@ export const initSocket = (httpServer) => {
           text,
           attachmentId,
           replyToId,
+          replyTo,
+          type,
+          mediaUrl,
+          fileName,
+          fileSize,
         });
 
         const populated = await message.populate('senderId', 'username displayName avatarUrl');
@@ -204,10 +235,15 @@ export const initSocket = (httpServer) => {
             senderUsername: populated.senderId?.username || socket.user.username,
             senderDisplayName: populated.senderId?.displayName || socket.user.displayName,
             clientMsgId: populated.clientMsgId,
-            type: populated.type,
+            type: populated.type || 'text',
             text: populated.text,
+            mediaUrl: populated.mediaUrl || null,
+            fileName: populated.fileName || null,
+            fileSize: populated.fileSize || 0,
             attachmentId: populated.attachmentId,
             replyToId: populated.replyToId,
+            replyTo: populated.replyTo || null,
+            reactions: populated.reactions || [],
             createdAt: populated.createdAt.toISOString(),
           };
 
@@ -233,6 +269,9 @@ export const initSocket = (httpServer) => {
           isDuplicate,
         });
       } catch (err) {
+        callback?.({ ok: false, message: err.message });
+      }
+    });
         callback?.({ ok: false, message: err.message });
       }
     });
@@ -352,6 +391,74 @@ export const initSocket = (httpServer) => {
       }
     });
 
+    // Message reactions (👍, ❤️, 😂, 🔥, 👏)
+    socket.on('message:reaction', async (payload = {}, callback) => {
+      try {
+        const { conversationId, messageId, emoji } = payload;
+        if (!conversationId || !messageId || !emoji) return callback?.({ ok: false });
+        const conv = await Conversation.findById(conversationId);
+        if (!conv) return callback?.({ ok: false, message: 'Conversation not found' });
+        assertParticipant(conv, socket.user._id);
+
+        const msg = await Message.findById(messageId);
+        if (!msg) return callback?.({ ok: false, message: 'Message not found' });
+
+        if (!msg.reactions) msg.reactions = [];
+        const existingIdx = msg.reactions.findIndex(
+          (r) => r.userId.toString() === socket.user._id.toString() && r.emoji === emoji
+        );
+
+        if (existingIdx >= 0) {
+          msg.reactions.splice(existingIdx, 1);
+        } else {
+          msg.reactions.push({
+            emoji,
+            userId: socket.user._id,
+            username: socket.user.username,
+            displayName: socket.user.displayName || socket.user.username,
+          });
+        }
+
+        await msg.save();
+
+        io.to(conversationId).emit('message:reaction', {
+          conversationId,
+          messageId,
+          reactions: msg.reactions,
+        });
+
+        callback?.({ ok: true, reactions: msg.reactions });
+      } catch (err) {
+        callback?.({ ok: false, message: err.message });
+      }
+    });
+
+    // Pinned messages
+    socket.on('conversation:pin', async (payload = {}, callback) => {
+      try {
+        const { conversationId, messageId } = payload;
+        const conv = await Conversation.findById(conversationId);
+        if (!conv) return callback?.({ ok: false, message: 'Conversation not found' });
+        assertParticipant(conv, socket.user._id);
+
+        conv.pinnedMessage = messageId || null;
+        await conv.save();
+
+        const populatedMsg = messageId
+          ? await Message.findById(messageId).populate('senderId', 'username displayName')
+          : null;
+
+        io.to(conversationId).emit('conversation:pinned', {
+          conversationId,
+          pinnedMessage: populatedMsg,
+        });
+
+        callback?.({ ok: true, pinnedMessage: populatedMsg });
+      } catch (err) {
+        callback?.({ ok: false, message: err.message });
+      }
+    });
+
     // Ephemeral typing events
     socket.on('typing:start', async (payload = {}) => {
       try {
@@ -360,6 +467,7 @@ export const initSocket = (httpServer) => {
           conversationId,
           userId,
           username: socket.user.username,
+          displayName: socket.user.displayName || socket.user.username,
           isTyping: true,
         });
       } catch (err) {}
@@ -372,6 +480,7 @@ export const initSocket = (httpServer) => {
           conversationId,
           userId,
           username: socket.user.username,
+          displayName: socket.user.displayName || socket.user.username,
           isTyping: false,
         });
       } catch (err) {}

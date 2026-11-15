@@ -561,3 +561,127 @@ export const deleteMessageController = async (req, res, next) => {
     next(err);
   }
 };
+
+export const updateGroupSettings = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, description, avatarUrl } = req.body;
+
+    const conversation = await Conversation.findById(id);
+    if (!conversation) return res.status(404).json({ message: 'Conversation not found' });
+    assertParticipant(conversation, req.user._id);
+
+    if (conversation.name?.toLowerCase().trim() === 'general chat') {
+      return res.status(400).json({ message: 'General Chat settings cannot be altered' });
+    }
+
+    if (name && name.trim()) conversation.name = name.trim();
+    if (description !== undefined) conversation.description = description.trim();
+    if (avatarUrl !== undefined) conversation.avatarUrl = avatarUrl;
+
+    await conversation.save();
+
+    const populated = await Conversation.findById(id)
+      .populate('participants', 'username displayName name lastSeenAt')
+      .populate('pinnedMessage');
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(id).emit('conversation:updated', populated);
+      for (const p of conversation.participants) {
+        io.to(`user:${p._id || p}`).emit('conversation:updated', populated);
+      }
+    }
+
+    res.json(populated);
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const kickParticipant = async (req, res, next) => {
+  try {
+    const { id, userId } = req.params;
+    const conversation = await Conversation.findById(id);
+    if (!conversation) return res.status(404).json({ message: 'Conversation not found' });
+
+    // Only room creator or admin can kick
+    if (conversation.createdBy?.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ message: 'Only the room creator can remove members' });
+    }
+
+    if (conversation.name?.toLowerCase().trim() === 'general chat') {
+      return res.status(400).json({ message: 'Cannot kick from General Chat' });
+    }
+
+    conversation.participants = conversation.participants.filter(
+      (p) => (p?._id || p).toString() !== userId.toString()
+    );
+    await conversation.save();
+    await Membership.deleteOne({ conversationId: id, userId });
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`user:${userId}`).emit('conversation:deleted', { conversationId: id });
+      io.to(id).emit('conversation:updated', conversation);
+    }
+
+    res.json({ ok: true, kickedUserId: userId });
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const exportConversation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { format = 'txt' } = req.query;
+
+    const conversation = await Conversation.findById(id);
+    if (!conversation) return res.status(404).json({ message: 'Conversation not found' });
+    assertParticipant(conversation, req.user._id);
+
+    const messages = await Message.find({ conversationId: id, deletedAt: null })
+      .sort({ seq: 1 })
+      .populate('senderId', 'username displayName name');
+
+    if (format === 'json') {
+      res.setHeader('Content-Disposition', `attachment; filename="chat-export-${id}.json"`);
+      res.setHeader('Content-Type', 'application/json');
+      return res.json({
+        conversationName: conversation.name || 'Direct Chat',
+        exportedAt: new Date().toISOString(),
+        totalMessages: messages.length,
+        messages: messages.map((m) => ({
+          seq: m.seq,
+          sender: m.senderId?.displayName || m.senderId?.username || 'Unknown',
+          text: m.text,
+          type: m.type,
+          sentAt: m.createdAt,
+        })),
+      });
+    }
+
+    // Default: TXT
+    const lines = [
+      `======================================================`,
+      `Zena Chat History Export: ${conversation.name || 'Direct Chat'}`,
+      `Exported: ${new Date().toLocaleString()}`,
+      `Total Messages: ${messages.length}`,
+      `======================================================\n`,
+    ];
+
+    for (const m of messages) {
+      const time = new Date(m.createdAt).toLocaleString();
+      const sender = m.senderId?.displayName || m.senderId?.username || 'Unknown';
+      lines.push(`[${time}] ${sender}: ${m.text || `[${m.type}]`}`);
+    }
+
+    const txtContent = lines.join('\n');
+    res.setHeader('Content-Disposition', `attachment; filename="chat-export-${id}.txt"`);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send(txtContent);
+  } catch (err) {
+    next(err);
+  }
+};
