@@ -272,9 +272,6 @@ export const initSocket = (httpServer) => {
         callback?.({ ok: false, message: err.message });
       }
     });
-        callback?.({ ok: false, message: err.message });
-      }
-    });
 
     // Message edit event
     socket.on('message:edit', async (payload = {}, callback) => {
